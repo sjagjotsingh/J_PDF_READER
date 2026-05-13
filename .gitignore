@@ -1,0 +1,33 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# PyInstaller build artifacts
+build_temp/
+dist/
+*.spec
+
+# Generated icon binaries (regenerated from build/App_icon.png by build scripts)
+build/App_icon.ico
+build/App_icon.icns
+build/App_icon.iconset/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local PDFs / test files
+*.pdf

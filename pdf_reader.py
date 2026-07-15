@@ -41,6 +41,7 @@ import collections
 import json
 import os
 import queue
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ from PyQt6.QtCore import (
     QThread,
     QTimer,
     pyqtSignal,
+    pyqtSlot,
 )
 from PyQt6.QtGui import (
     QAction,
@@ -74,6 +76,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -96,7 +99,10 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QStatusBar,
+    QTabBar,
+    QTabWidget,
     QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
@@ -242,6 +248,70 @@ QScrollBar::handle:horizontal:hover { background: #8c96a0; }
 QScrollBar::add-line, QScrollBar::sub-line { background: none; height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
+/* Only style the *document* tab bar (the QTabWidget at the top of the viewer).
+   Dock tab bars are bare QTabBar widgets - they keep Qt defaults. */
+QTabWidget#docTabs::pane { border: none; }
+QTabWidget#docTabs > QTabBar { background: transparent; }
+QTabWidget#docTabs > QTabBar::tab {
+    background: #eef0f3;
+    color: #57606a;
+    padding: 6px 14px;
+    border: 1px solid #e1e4e8;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    min-width: 120px;
+    max-width: 220px;
+}
+QTabWidget#docTabs > QTabBar::tab:selected { background: #ffffff; color: #1f2328; border-bottom: 1px solid #ffffff; }
+QTabWidget#docTabs > QTabBar::tab:hover:!selected { background: #f3f4f6; }
+QTabWidget#docTabs > QTabBar::tab:first { margin-left: 4px; }
+QTabWidget#docTabs > QTabBar::close-button { subcontrol-position: right; }
+QPushButton#tabNewBtn {
+    background: transparent; color: #57606a; border: none;
+    font-size: 16pt; font-weight: 500; padding: 0 0 2px 0;
+    margin-right: 6px; border-radius: 4px;
+}
+QPushButton#tabNewBtn:hover  { background: #eef0f3; color: #1f2328; }
+QPushButton#tabNewBtn:pressed{ background: #e1e4e8; }
+
+/* ----- Start Screen ----- */
+QWidget#startScreen { background-color: #f5f6f8; }
+QLabel#startTitle    { font-size: 28pt; font-weight: 700; color: #2563eb; }
+QLabel#startSubtitle { font-size: 11pt; color: #57606a; }
+QLabel#startSection  { font-size: 11pt; font-weight: 600; color: #57606a; }
+QPushButton#startOpenBtn {
+    background: #2563eb; color: white; border: none; border-radius: 8px;
+    font-size: 11pt; font-weight: 600; text-align: center;
+}
+QPushButton#startOpenBtn:hover  { background: #1d4ed8; }
+QPushButton#startOpenBtn:pressed{ background: #1e40af; }
+QPushButton#startClearBtn {
+    background: transparent; border: none; color: #6b7280;
+    font-size: 9pt; padding: 2px 6px;
+}
+QPushButton#startClearBtn:hover { color: #2563eb; text-decoration: underline; }
+
+QPushButton#recentRow {
+    background: #ffffff; border: 1px solid #e1e4e8; border-radius: 8px;
+    text-align: left; padding: 0;
+}
+QPushButton#recentRow:hover   { background: #f8fafc; border-color: #2563eb; }
+QPushButton#recentRow:pressed { background: #eef2f7; }
+QPushButton#recentRow[missing="true"] { background: #fafafa; border-style: dashed; }
+QLabel#recentRowIcon   { font-size: 16pt; background: transparent; border: none; }
+QLabel#recentRowName   { font-size: 10pt; font-weight: 600; color: #1f2328; background: transparent; border: none; }
+QLabel#recentRowFolder { font-size: 8pt;  color: #8c96a0; background: transparent; border: none; }
+QLabel#recentRowMeta   { font-size: 8pt;  color: #8c96a0; background: transparent; border: none; }
+QPushButton#recentRowRemove {
+    background: transparent; border: none; border-radius: 12px;
+    color: #8c96a0; font-size: 11pt; font-weight: 600; padding: 0; min-width: 0;
+}
+QPushButton#recentRowRemove:hover   { background: #e5484d; color: #ffffff; }
+QPushButton#recentRowRemove:pressed { background: #c93c40; color: #ffffff; }
+QPushButton#recentRow[missing="true"] QLabel#recentRowName   { color: #9aa0a6; }
+QPushButton#recentRow[missing="true"] QLabel#recentRowIcon   { color: #c6cdd5; }
+
 QToolTip { background-color: #1f2328; color: white; border: none; padding: 4px 8px; border-radius: 4px; }
 """
 
@@ -338,17 +408,69 @@ QScrollBar::handle:horizontal:hover { background: #555c68; }
 QScrollBar::add-line, QScrollBar::sub-line { background: none; height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: none; }
 
-QTabBar::tab {
+/* Only style the *document* tab bar (the QTabWidget at the top of the viewer).
+   Dock tab bars are bare QTabBar widgets - they keep the default dark look. */
+QTabWidget#docTabs::pane { border: none; }
+QTabWidget#docTabs > QTabBar { background: transparent; }
+QTabWidget#docTabs > QTabBar::tab {
     background: #20232a;
-    color: #c0c4cc;
+    color: #9aa0a6;
     padding: 6px 14px;
     border: 1px solid #2c2f36;
     border-bottom: none;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
+    min-width: 120px;
+    max-width: 220px;
 }
-QTabBar::tab:selected { background: #181a1f; color: #ffffff; }
-QTabBar::tab:hover { background: #2a2e36; }
+QTabWidget#docTabs > QTabBar::tab:selected { background: #181a1f; color: #e6e6e6; border-bottom: 1px solid #181a1f; }
+QTabWidget#docTabs > QTabBar::tab:hover:!selected { background: #2a2e36; }
+QTabWidget#docTabs > QTabBar::tab:first { margin-left: 4px; }
+QTabWidget#docTabs > QTabBar::close-button { subcontrol-position: right; }
+QPushButton#tabNewBtn {
+    background: transparent; color: #9aa0a6; border: none;
+    font-size: 16pt; font-weight: 500; padding: 0 0 2px 0;
+    margin-right: 6px; border-radius: 4px;
+}
+QPushButton#tabNewBtn:hover  { background: #2a2e36; color: #e6e6e6; }
+QPushButton#tabNewBtn:pressed{ background: #1a1d22; }
+
+/* ----- Start Screen ----- */
+QWidget#startScreen { background-color: #181a1f; }
+QLabel#startTitle    { font-size: 28pt; font-weight: 700; color: #60a5fa; }
+QLabel#startSubtitle { font-size: 11pt; color: #9aa0a6; }
+QLabel#startSection  { font-size: 11pt; font-weight: 600; color: #c0c4cc; }
+QPushButton#startOpenBtn {
+    background: #3b82f6; color: white; border: none; border-radius: 8px;
+    font-size: 11pt; font-weight: 600; text-align: center;
+}
+QPushButton#startOpenBtn:hover  { background: #2563eb; }
+QPushButton#startOpenBtn:pressed{ background: #1d4ed8; }
+QPushButton#startClearBtn {
+    background: transparent; border: none; color: #8b949e;
+    font-size: 9pt; padding: 2px 6px;
+}
+QPushButton#startClearBtn:hover { color: #60a5fa; text-decoration: underline; }
+
+QPushButton#recentRow {
+    background: #20232a; border: 1px solid #2c2f36; border-radius: 8px;
+    text-align: left; padding: 0;
+}
+QPushButton#recentRow:hover   { background: #262a31; border-color: #3b82f6; }
+QPushButton#recentRow:pressed { background: #1a1d22; }
+QPushButton#recentRow[missing="true"] { background: #1d2026; border-style: dashed; }
+QLabel#recentRowIcon   { font-size: 16pt; background: transparent; border: none; }
+QLabel#recentRowName   { font-size: 10pt; font-weight: 600; color: #e6e6e6; background: transparent; border: none; }
+QLabel#recentRowFolder { font-size: 8pt;  color: #8b949e; background: transparent; border: none; }
+QLabel#recentRowMeta   { font-size: 8pt;  color: #8b949e; background: transparent; border: none; }
+QPushButton#recentRowRemove {
+    background: transparent; border: none; border-radius: 12px;
+    color: #8b949e; font-size: 11pt; font-weight: 600; padding: 0; min-width: 0;
+}
+QPushButton#recentRowRemove:hover   { background: #e5484d; color: #ffffff; }
+QPushButton#recentRowRemove:pressed { background: #c93c40; color: #ffffff; }
+QPushButton#recentRow[missing="true"] QLabel#recentRowName   { color: #6a6f78; }
+QPushButton#recentRow[missing="true"] QLabel#recentRowIcon   { color: #4a505a; }
 
 QToolTip { background-color: #e6e6e6; color: #181a1f; border: none; padding: 4px 8px; border-radius: 4px; }
 """
@@ -369,13 +491,20 @@ class SearchHit:
 class RenderKey:
     """Cache key for a rendered page bitmap."""
     page_index: int
-    zoom_x1000: int          # int to make hashable & stable
+    zoom_x1000: int          # int to make hashable & stable (LOGICAL zoom)
     rotation: int
     color_mode: str          # "light", "dark", "sepia"
+    dpr_x1000: int = 1000    # device pixel ratio (screen scale), x1000
+
+    @property
+    def dpr(self) -> float:
+        return self.dpr_x1000 / 1000.0
 
     @classmethod
-    def make(cls, page_index: int, zoom: float, rotation: int, color_mode: str) -> "RenderKey":
-        return cls(page_index, int(round(zoom * 1000)), rotation % 360, color_mode)
+    def make(cls, page_index: int, zoom: float, rotation: int, color_mode: str,
+             dpr: float = 1.0) -> "RenderKey":
+        return cls(page_index, int(round(zoom * 1000)), rotation % 360, color_mode,
+                   int(round(dpr * 1000)))
 
 
 @dataclass(order=True)
@@ -384,6 +513,7 @@ class RenderTask:
     seq: int                                     # tie-breaker (newer wins)
     key: RenderKey = field(compare=False)
     is_thumb: bool = field(default=False, compare=False)
+    doc_gen: int = field(default=0, compare=False)   # document generation stamp
 
 
 # ===========================================================================
@@ -425,30 +555,158 @@ class LRUCache:
 # ===========================================================================
 
 
+def _render_pool_size() -> int:
+    """Number of parallel render threads. Uses most CPU cores but leaves one
+    for the GUI, capped so we don't open too many fitz.Document handles."""
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    return max(2, min(6, cores - 1))
+
+
+def _cpu_pool_size() -> int:
+    """Worker count for CPU-heavy per-page batch jobs (search, extract, OCR).
+    Uses most cores but leaves one free for the UI. Cross-platform (relies
+    only on os.cpu_count and threads, so identical on macOS and Windows)."""
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    return max(2, min(8, cores - 1))
+
+
+def parallel_pages(doc_path: str, page_indices, fn, max_workers: int = None,
+                   cancel=None, on_progress=None):
+    """Run ``fn(page, page_index)`` for many pages IN PARALLEL and return a
+    dict ``{page_index: result}``.
+
+    Cross-platform parallelism for CPU-heavy PDF work. PyMuPDF is not safe to
+    share one Document across threads, so each worker thread opens its OWN
+    ``fitz.open(doc_path)`` handle (thread-local) and loads pages from it.
+
+    Args:
+        doc_path:     path to the PDF file (each thread opens its own handle).
+        page_indices: iterable of 0-based page indices to process.
+        fn:           callable(page: fitz.Page, page_index: int) -> result.
+        max_workers:  thread count (defaults to _cpu_pool_size()).
+        cancel:       optional threading.Event; processing stops if it is set.
+        on_progress:  optional callable(done:int, total:int) called from
+                      worker threads as pages finish (must be thread-safe /
+                      marshalled by the caller if it touches the GUI).
+
+    Results are collected out of order but keyed by page index, so the caller
+    can reassemble them in page order.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    page_indices = list(page_indices)
+    total = len(page_indices)
+    results: Dict[int, object] = {}
+    if total == 0:
+        return results
+    if max_workers is None:
+        max_workers = _cpu_pool_size()
+    max_workers = max(1, min(max_workers, total))
+
+    # Thread-local storage so each worker reuses one fitz.Document handle.
+    tls = threading.local()
+    lock = threading.Lock()
+    open_docs: List[fitz.Document] = []   # every handle we open, for cleanup
+    done = 0
+
+    def _get_doc():
+        d = getattr(tls, "doc", None)
+        if d is None:
+            d = fitz.open(doc_path)
+            tls.doc = d
+            with lock:
+                open_docs.append(d)
+        return d
+
+    def _worker(idx: int):
+        nonlocal done
+        if cancel is not None and cancel.is_set():
+            return idx, None
+        try:
+            d = _get_doc()
+            page = d.load_page(idx)
+            res = fn(page, idx)
+        except Exception:
+            res = None
+        with lock:
+            done += 1
+            cur = done
+        if on_progress is not None:
+            try:
+                on_progress(cur, total)
+            except Exception:
+                pass
+        return idx, res
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers,
+                                thread_name_prefix="pdfpar") as ex:
+            for idx, res in ex.map(_worker, page_indices):
+                if res is not None:
+                    results[idx] = res
+    finally:
+        # Deterministically close every per-thread document handle. Safe here
+        # because the ThreadPoolExecutor has fully shut down (its 'with' block
+        # exited) so no worker is still using a handle.
+        for d in open_docs:
+            try:
+                d.close()
+            except Exception:
+                pass
+    return results
+
+
 class RenderWorker(QObject):
     """
-    Lives on a worker QThread. Pulls render tasks off a thread-safe priority
-    queue and emits the resulting QImage on the GUI thread via a signal.
+    Owns a POOL of render threads. Each thread pulls tasks off a shared
+    thread-safe priority queue and emits the resulting QImage on the GUI
+    thread via a signal.
 
-    PyMuPDF is not thread-safe across threads sharing the same Document.
-    Because a single worker thread handles all renders, access is serialised.
+    PyMuPDF is NOT thread-safe across threads sharing the same Document, so
+    each pool thread opens its OWN fitz.Document handle from the file path.
+    Rendering different pages in parallel then gives a big speed-up on large
+    documents / high zoom without corrupting PyMuPDF state.
     """
     pageRendered = pyqtSignal(RenderKey, QImage, bool)  # key, image, is_thumb
 
     def __init__(self):
         super().__init__()
         self._queue: "queue.PriorityQueue[RenderTask]" = queue.PriorityQueue()
-        self._doc: Optional[fitz.Document] = None
+        self._doc_path: Optional[str] = None
+        self._doc_generation = 0     # bumped on every set_document; stale tasks dropped
         self._stop = False
         self._seq = 0
         self._lock = threading.Lock()
         # Membership tracking so we don't queue a key twice.
         self._pending: set = set()
+        self._threads: List[threading.Thread] = []
+        self._n = _render_pool_size()
 
-    # Document is set from the GUI thread; the worker is paused until then.
+    def start(self):
+        """Spin up the worker thread pool. Safe to call once."""
+        if self._threads:
+            return
+        self._stop = False
+        for i in range(self._n):
+            t = threading.Thread(target=self._run_loop, name=f"render-{i}", daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    # Document is set from the GUI thread; workers open their own handle by path.
     def set_document(self, doc: Optional[fitz.Document]):
         with self._lock:
-            self._doc = doc
+            # We only need the PATH - each worker opens its own handle.
+            try:
+                self._doc_path = doc.name if doc is not None else None
+            except Exception:
+                self._doc_path = None
+            self._doc_generation += 1
             # Drain queue when switching docs.
             try:
                 while True:
@@ -464,39 +722,86 @@ class RenderWorker(QObject):
                 return
             self._pending.add(mem_key)
             self._seq += 1
-            self._queue.put(RenderTask(priority, self._seq, key, is_thumb))
+            gen = self._doc_generation
+            self._queue.put(RenderTask(priority, self._seq, key, is_thumb, gen))
 
     def stop(self):
         self._stop = True
-        # Push a dummy item to unblock the get()
-        self._seq += 1
-        self._queue.put(RenderTask(0, self._seq, RenderKey(-1, 0, 0, "light")))
+        # Push one sentinel per thread to unblock their get() calls.
+        with self._lock:
+            for _ in range(max(1, len(self._threads))):
+                self._seq += 1
+                self._queue.put(RenderTask(0, self._seq, RenderKey(-1, 0, 0, "light"), -1))
 
-    def run_loop(self):
-        while not self._stop:
+    def join(self, timeout: float = 1.5):
+        """Wait for all pool threads to finish (best-effort)."""
+        for t in self._threads:
             try:
-                task = self._queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if self._stop:
-                break
-            with self._lock:
-                doc = self._doc
-                self._pending.discard((task.key, task.is_thumb))
-            if doc is None or task.key.page_index < 0 or task.key.page_index >= doc.page_count:
-                continue
-            try:
-                img = self._render(doc, task.key, task.is_thumb)
+                t.join(timeout=timeout)
             except Exception:
-                continue
-            if img is not None:
-                self.pageRendered.emit(task.key, img, task.is_thumb)
+                pass
+        self._threads = []
+
+    def _run_loop(self):
+        """Body of each pool thread. Owns its own fitz.Document, reopened
+        whenever the active document (path/generation) changes."""
+        local_doc: Optional[fitz.Document] = None
+        local_path: Optional[str] = None
+        local_gen = -1
+        try:
+            while not self._stop:
+                try:
+                    task = self._queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if self._stop:
+                    break
+                with self._lock:
+                    path = self._doc_path
+                    gen = self._doc_generation
+                    self._pending.discard((task.key, task.is_thumb))
+                # Drop tasks queued against an older document.
+                if task.doc_gen != gen or path is None or task.key.page_index < 0:
+                    continue
+                # (Re)open this thread's private document handle if the active
+                # document changed since we last rendered.
+                if local_doc is None or local_path != path or local_gen != gen:
+                    if local_doc is not None:
+                        try:
+                            local_doc.close()
+                        except Exception:
+                            pass
+                        local_doc = None
+                    try:
+                        local_doc = fitz.open(path)
+                    except Exception:
+                        local_doc = None
+                    local_path = path
+                    local_gen = gen
+                if local_doc is None or task.key.page_index >= local_doc.page_count:
+                    continue
+                try:
+                    img = self._render(local_doc, task.key, task.is_thumb)
+                except Exception:
+                    continue
+                if img is not None:
+                    self.pageRendered.emit(task.key, img, task.is_thumb)
+        finally:
+            if local_doc is not None:
+                try:
+                    local_doc.close()
+                except Exception:
+                    pass
 
     def _render(self, doc: fitz.Document, key: RenderKey, is_thumb: bool) -> Optional[QImage]:
         page = doc.load_page(key.page_index)
         zoom = key.zoom_x1000 / 1000.0
         if is_thumb:
             zoom = 0.18
+        else:
+            # Render at the screen's device pixel ratio so the bitmap has 1:1
+            # physical pixels on HiDPI displays (no upscaling => no blur).
+            zoom *= key.dpr
         mat = fitz.Matrix(zoom, zoom).prerotate(key.rotation)
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = QImage(
@@ -536,6 +841,10 @@ class PdfPageWidget(QWidget):
         self.search_hits: List[fitz.Rect] = []
         self.current_hit_local_idx: int = -1
 
+        # Sentence-level highlight rects driven by the read-aloud feature.
+        # Listed in PDF-point coords (same as search_hits).
+        self.tts_hits: List[fitz.Rect] = []
+
         # Tint overlay drawn on top of the rendered pixmap (e.g. for sepia).
         self.tint_color: Optional[QColor] = None
 
@@ -567,6 +876,11 @@ class PdfPageWidget(QWidget):
     def set_search_hits(self, hits: List[fitz.Rect], current_local_idx: int = -1):
         self.search_hits = hits
         self.current_hit_local_idx = current_local_idx
+        self.update()
+
+    def set_tts_hits(self, hits: List[fitz.Rect]):
+        """Set the read-aloud highlight rects for this page (in PDF points)."""
+        self.tts_hits = hits or []
         self.update()
 
     def clear_selection(self):
@@ -634,11 +948,16 @@ class PdfPageWidget(QWidget):
             p.drawPixmap(page_rect.topLeft(), self.pixmap_image)
             if self.tint_color is not None:
                 # Sepia / warm tint overlay; multiplied compositing tints the page.
+                # Use the pixmap's LOGICAL (device-independent) size so the tint
+                # lines up on HiDPI displays where the pixmap holds dpr*zoom px.
+                dpr = self.pixmap_image.devicePixelRatio() or 1.0
+                log_w = int(self.pixmap_image.width() / dpr)
+                log_h = int(self.pixmap_image.height() / dpr)
                 p.save()
                 p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
                 p.fillRect(
                     page_rect.x(), page_rect.y(),
-                    self.pixmap_image.width(), self.pixmap_image.height(),
+                    log_w, log_h,
                     self.tint_color,
                 )
                 p.restore()
@@ -664,6 +983,18 @@ class PdfPageWidget(QWidget):
                     color = QColor(255, 60, 60, 160)
                 else:
                     color = QColor(255, 165, 0, 110)
+                p.fillRect(
+                    int(r.x0 * self.zoom) + 6,
+                    int(r.y0 * self.zoom) + 6,
+                    max(1, int((r.x1 - r.x0) * self.zoom)),
+                    max(1, int((r.y1 - r.y0) * self.zoom)),
+                    color,
+                )
+
+        # Read-aloud sentence highlight (one rect per visual line covered).
+        if self.tts_hits:
+            color = QColor(255, 230, 0, 90)  # translucent yellow
+            for r in self.tts_hits:
                 p.fillRect(
                     int(r.x0 * self.zoom) + 6,
                     int(r.y0 * self.zoom) + 6,
@@ -713,6 +1044,18 @@ class PdfViewer(QScrollArea):
         self.doc: Optional[fitz.Document] = None
         self.doc_path: Optional[str] = None
         self.page_widgets: List[PdfPageWidget] = []
+        # Timer that builds page placeholder widgets in the background for
+        # large documents (see _build_placeholders / _build_placeholder_chunk).
+        self._build_timer: Optional[QTimer] = None
+        # Last page the user actually scrolled to in this viewer.
+        # current_page_index() relies on the widget being visible, so when this
+        # viewer is hidden (e.g. another tab is active) it can't compute the
+        # real page. We update _last_known_page from pageChanged.emit calls so
+        # save_session_state can persist the correct page for inactive tabs.
+        self._last_known_page: int = 0
+        # Page-index stash kept across hide/show so switching tabs
+        # doesn't reset us to page 1 (Qt collapses hidden scroll areas).
+        self._stashed_page_idx: Optional[int] = None
         self.zoom: float = 1.0
         self.fit_mode: Optional[str] = "width"
         self.rotation: int = 0
@@ -723,12 +1066,14 @@ class PdfViewer(QScrollArea):
         # Render cache & worker
         self.cache = LRUCache(RENDER_CACHE_MAX)
         self.thumb_cache = LRUCache(THUMB_CACHE_MAX)
+        # OCR-words cache populated by AutoOcrController for pages that have
+        # no native text layer. Read by ReadAloudController and search.
+        self._ocr_words_cache: Dict[int, List[OcrWord]] = {}
+        # RenderWorker now manages its OWN pool of daemon threads (each with a
+        # private fitz.Document), so it no longer needs a wrapping QThread.
         self.worker = RenderWorker()
-        self.worker_thread = QThread()
-        self.worker.moveToThread(self.worker_thread)
-        self.worker_thread.started.connect(self.worker.run_loop)
         self.worker.pageRendered.connect(self._on_page_rendered)
-        self.worker_thread.start()
+        self.worker.start()
 
         # Search
         self.search_hits: List[SearchHit] = []
@@ -750,6 +1095,9 @@ class PdfViewer(QScrollArea):
         self._autoscroll_active = False
 
         self.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        # Track the last page the user navigated to, so save_session_state can
+        # persist the right value even when this viewer is in an inactive tab.
+        self.pageChanged.connect(self._remember_page)
 
         # Forward thumbnail-rendered events through our class-level signal.
         self.worker.pageRendered.connect(self._forward_thumb)
@@ -798,6 +1146,10 @@ class PdfViewer(QScrollArea):
         return True
 
     def close_pdf(self, emit: bool = True):
+        # Stop any in-flight chunked placeholder build.
+        if self._build_timer is not None:
+            self._build_timer.stop()
+            self._build_timer = None
         self.worker.set_document(None)
         if self.doc is not None:
             self.doc.close()
@@ -828,47 +1180,113 @@ class PdfViewer(QScrollArea):
                 item.widget().deleteLater()
         self.page_widgets = []
 
+        # PERFORMANCE: PyMuPDF's load_page(i).rect is expensive for large/complex
+        # PDFs (it parses the full page object). Calling it for every page on the
+        # UI thread caused multi-minute hangs on large documents. Instead we use
+        # page 0's size as the default for every placeholder, then refine each
+        # one's true rect lazily in the background. Most PDFs have uniform pages
+        # so the lazy refinement is rarely visible.
+        try:
+            ref_rect = self.doc.load_page(0).rect
+            default_w, default_h = ref_rect.width, ref_rect.height
+        except Exception:
+            default_w, default_h = 612.0, 792.0  # US Letter fallback
+
+        # Track which page rects we've actually loaded so we don't redo them.
+        self._page_size_loaded: set = {0}
+        self._default_page_size = (default_w, default_h)
+
+        # PERFORMANCE: creating one QWidget per page up front blocks the GUI
+        # thread. For a 1760-page book that's a multi-second freeze before the
+        # document even appears. We therefore build the placeholders in
+        # CHUNKS: the first chunk synchronously (so the first pages show
+        # instantly), and the remainder in the background via a timer so the
+        # window is interactive immediately.
+        self._build_page_count = self.doc.page_count
+        self._build_next_index = 0
+        # Cancel any in-flight chunked build from a previous document.
+        if hasattr(self, "_build_timer") and self._build_timer is not None:
+            self._build_timer.stop()
+
+        # Build enough right away to fill a couple of screens.
+        self._build_placeholder_chunk(first_chunk=True)
+
+        if self._build_next_index < self._build_page_count:
+            self._build_timer = QTimer(self)
+            self._build_timer.setSingleShot(False)
+            self._build_timer.timeout.connect(self._build_placeholder_chunk)
+            self._build_timer.start(0)   # run between event-loop iterations
+        else:
+            if self.view_mode == self.VIEW_SINGLE:
+                self._update_single_page_visibility()
+
+        self._schedule_visible_render()
+        # Page-size refinement is now done lazily ONLY for pages that scroll
+        # into view (see _do_refresh_visible). Refining every page upfront
+        # called load_page() thousands of times on the UI thread and made
+        # large PDFs unusable.
+
+    def _build_placeholder_chunk(self, first_chunk: bool = False):
+        """Create a batch of page placeholder widgets. Called synchronously
+        for the first batch, then repeatedly from a timer for the rest so the
+        UI stays responsive on very large documents."""
+        if self.doc is None:
+            return
+        default_w, default_h = getattr(self, "_default_page_size", (612.0, 792.0))
+        # Bigger first batch (fills the view immediately); smaller follow-ups
+        # to keep each timer tick short.
+        batch = 40 if first_chunk else 60
+        count = self._build_page_count
+        end = min(self._build_next_index + batch, count)
+
         if self.view_mode == self.VIEW_TWO:
-            # Two pages per row
-            i = 0
-            while i < self.doc.page_count:
+            i = self._build_next_index
+            while i < end:
                 row = QWidget()
                 hl = QHBoxLayout(row)
                 hl.setContentsMargins(0, 0, 0, 0)
                 hl.setSpacing(0)
                 hl.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-                # First "cover" page is shown alone on the right
                 if i == 0:
                     spacer = QWidget()
                     spacer.setFixedSize(1, 1)
                     hl.addWidget(spacer)
-                    w = self._make_page_widget(i)
+                    w = self._make_page_widget(i, default_w, default_h, exact=(i == 0))
                     hl.addWidget(w)
                     self.page_widgets.append(w)
                     i += 1
                 else:
-                    w_left = self._make_page_widget(i)
+                    w_left = self._make_page_widget(i, default_w, default_h)
                     hl.addWidget(w_left)
                     self.page_widgets.append(w_left)
-                    if i + 1 < self.doc.page_count:
-                        w_right = self._make_page_widget(i + 1)
+                    if i + 1 < count:
+                        w_right = self._make_page_widget(i + 1, default_w, default_h)
                         hl.addWidget(w_right)
                         self.page_widgets.append(w_right)
                     i += 2
                 self._layout.addWidget(row)
+            self._build_next_index = i
         else:
-            for i in range(self.doc.page_count):
-                w = self._make_page_widget(i)
+            for i in range(self._build_next_index, end):
+                w = self._make_page_widget(i, default_w, default_h, exact=(i == 0))
                 self.page_widgets.append(w)
                 self._layout.addWidget(w)
+            self._build_next_index = end
+
+        done = self._build_next_index >= count
+        if done:
+            if hasattr(self, "_build_timer") and self._build_timer is not None:
+                self._build_timer.stop()
             if self.view_mode == self.VIEW_SINGLE:
                 self._update_single_page_visibility()
+            self._schedule_visible_render()
 
-        self._schedule_visible_render()
-
-    def _make_page_widget(self, i: int) -> PdfPageWidget:
-        rect = self.doc.load_page(i).rect
-        w = PdfPageWidget(i, rect.width, rect.height, self._container)
+    def _make_page_widget(self, i: int, w_pt: float, h_pt: float,
+                          exact: bool = False) -> PdfPageWidget:
+        """Build a placeholder widget. If ``exact`` is False, w_pt/h_pt is just
+        a guess - the real page rect will be loaded later by
+        _refine_page_sizes_chunk."""
+        w = PdfPageWidget(i, w_pt, h_pt, self._container)
         w.color_mode = self.color_mode
         w.tint_color = QColor(244, 220, 170) if self.color_mode == "sepia" else None
         w.update_geometry(self.zoom, self.rotation)
@@ -889,6 +1307,10 @@ class PdfViewer(QScrollArea):
         if not visible:
             return
         first, last = visible[0], visible[-1]
+        # Lazily refine page rects ONLY for the small set of currently-visible
+        # pages. This keeps non-uniform PDFs visually correct without ever
+        # touching pages the user hasn't scrolled to.
+        self._refine_visible_page_sizes(visible)
         # Build prioritised list: visible first, then prefetch pages.
         prio_list: List[Tuple[int, int]] = []
         for idx in visible:
@@ -902,15 +1324,49 @@ class PdfViewer(QScrollArea):
         for idx, prio in prio_list:
             self._ensure_rendered(idx, priority=prio)
 
+    def _refine_visible_page_sizes(self, visible: List[int]):
+        """Load the real rect of each visible page and resize its placeholder
+        if it differs from the default. Only touches pages already in view -
+        never iterates over every page in the document."""
+        if not hasattr(self, "_page_size_loaded"):
+            return
+        for page_idx in visible:
+            if page_idx in self._page_size_loaded:
+                continue
+            self._page_size_loaded.add(page_idx)
+            try:
+                rect = self.doc.load_page(page_idx).rect
+            except Exception:
+                continue
+            w = self._widget_for_page(page_idx)
+            if w is None:
+                continue
+            real_w, real_h = rect.width, rect.height
+            if (abs(real_w - w.page_w_pt) > 0.5 or
+                    abs(real_h - w.page_h_pt) > 0.5):
+                w.page_w_pt = real_w
+                w.page_h_pt = real_h
+                w.update_geometry(self.zoom, self.rotation)
+
     def _render_color_mode(self) -> str:
         # Sepia uses the same bitmap as light + a tint overlay at paint time.
         return "dark" if self.color_mode == "dark" else "light"
+
+    def _device_pixel_ratio(self) -> float:
+        """Current screen device pixel ratio (Windows display scale). Falls
+        back to 1.0 if unavailable."""
+        try:
+            dpr = self.devicePixelRatioF()
+            return dpr if dpr and dpr > 0 else 1.0
+        except Exception:
+            return 1.0
 
     def _ensure_rendered(self, page_index: int, priority: int = 5):
         widget = self._widget_for_page(page_index)
         if widget is None:
             return
-        key = RenderKey.make(page_index, self.zoom, self.rotation, self._render_color_mode())
+        key = RenderKey.make(page_index, self.zoom, self.rotation,
+                             self._render_color_mode(), self._device_pixel_ratio())
         cached = self.cache.get(key)
         if cached is not None:
             if widget.pixmap_image is not cached:
@@ -932,9 +1388,15 @@ class PdfViewer(QScrollArea):
         # Discard if config has changed in the meantime.
         if (key.zoom_x1000 != int(round(self.zoom * 1000))
                 or key.rotation != self.rotation % 360
-                or key.color_mode != self._render_color_mode()):
+                or key.color_mode != self._render_color_mode()
+                or key.dpr_x1000 != int(round(self._device_pixel_ratio() * 1000))):
             return
         pix = QPixmap.fromImage(img)
+        # Tell Qt this pixmap is high-DPI: it holds (zoom*dpr) device pixels but
+        # should occupy (zoom) logical pixels, so drawPixmap maps it 1:1 on
+        # screen and it renders crisply instead of being upscaled/blurred.
+        if key.dpr_x1000 != 1000:
+            pix.setDevicePixelRatio(key.dpr)
         self.cache.put(key, pix)
         widget = self._widget_for_page(key.page_index)
         if widget is not None:
@@ -961,10 +1423,11 @@ class PdfViewer(QScrollArea):
         return result
 
     def _on_scroll(self, _val):
-        if self.doc:
-            cur = self.current_page_index()
-            self.pageChanged.emit(cur)
-            self._schedule_visible_render()
+        if not self.doc:
+            return
+        cur = self.current_page_index()
+        self.pageChanged.emit(cur)
+        self._schedule_visible_render()
 
     def current_page_index(self) -> int:
         if not self.page_widgets:
@@ -973,6 +1436,32 @@ class PdfViewer(QScrollArea):
         if visible:
             return visible[0]
         return self.page_widgets[0].page_index
+
+    def _remember_page(self, idx: int):
+        """Cache the most recent page index emitted via pageChanged.
+
+        Only update when there's an actual visible page widget. When the viewer
+        is hidden (another tab is active), _visible_indices() is [] and
+        current_page_index() falls back to 0 - we must NOT cache that, or it
+        would clobber the real last-known page when the user just switches tabs.
+        """
+        if self._visible_indices():
+            # The page came from a real visible widget - trust it.
+            self._last_known_page = idx
+        elif idx > 0:
+            # No visible widgets but a positive index was emitted (e.g. by
+            # goto_page from session restore) - still trust it.
+            self._last_known_page = idx
+        # else: idx == 0 with no visible widgets => phantom event, ignore.
+
+    def last_known_page(self) -> int:
+        """Best-effort current page that works even when the viewer is hidden."""
+        # When the viewer is the active tab and has visible pages,
+        # current_page_index() is authoritative. Otherwise return the cached
+        # value from the last real navigation.
+        if self._visible_indices():
+            return self.current_page_index()
+        return self._last_known_page
 
     # ------------------------------------------------------------------
     # Navigation
@@ -1145,14 +1634,35 @@ class PdfViewer(QScrollArea):
             w.set_search_hits([], -1)
         if self.doc is None or not query:
             return 0
-        for i in range(self.doc.page_count):
-            page = self.doc.load_page(i)
-            try:
-                rects = page.search_for(query, quads=False)
-            except Exception:
-                rects = []
-            for r in rects:
-                self.search_hits.append(SearchHit(page_index=i, rect=r))
+
+        n = self.doc.page_count
+
+        # Small documents: a plain sequential scan is fastest (no thread setup
+        # overhead). Large ones: fan out across CPU cores. Each parallel worker
+        # opens its own fitz handle (PyMuPDF isn't safe sharing one Document).
+        if n <= 8 or not self.doc_path:
+            for i in range(n):
+                try:
+                    rects = self.doc.load_page(i).search_for(query, quads=False)
+                except Exception:
+                    rects = []
+                for r in rects:
+                    self.search_hits.append(SearchHit(page_index=i, rect=r))
+        else:
+            def _search_page(page, idx):
+                try:
+                    return page.search_for(query, quads=False)
+                except Exception:
+                    return []
+            per_page = parallel_pages(self.doc_path, range(n), _search_page)
+            # Reassemble in page order for stable next/prev navigation.
+            for i in range(n):
+                rects = per_page.get(i)
+                if not rects:
+                    continue
+                for r in rects:
+                    self.search_hits.append(SearchHit(page_index=i, rect=r))
+
         if self.search_hits:
             self.current_hit_idx = 0
             self._scroll_to_hit(self.search_hits[0])
@@ -1301,6 +1811,39 @@ class PdfViewer(QScrollArea):
         super().resizeEvent(e)
         self._fit_timer.start(120)
 
+    def hideEvent(self, e):
+        # Cache the page index before Qt collapses our hidden viewport.
+        # Without this, switching to another tab and back resets the scroll
+        # to the top (page 1) because the layout of a hidden QScrollArea
+        # is rebuilt on next show.
+        if self.doc is not None:
+            # Only stash if we have a real visible page right now -
+            # otherwise the previously-stashed value is more accurate than
+            # whatever current_page_index() reports during the hide transition.
+            if self._visible_indices():
+                self._stashed_page_idx = self.current_page_index()
+            elif self._last_known_page > 0:
+                self._stashed_page_idx = self._last_known_page
+        super().hideEvent(e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # Restore the page after Qt finishes laying out the viewport AND any
+        # pending fit-mode recalculation. resizeEvent triggers fit_timer with a
+        # 120 ms delay, and that recomputes page geometries; if we restored
+        # earlier the scroll position would be invalidated by the reflow.
+        if getattr(self, "_stashed_page_idx", None) is not None:
+            stashed_page = self._stashed_page_idx
+            self._stashed_page_idx = None
+            QTimer.singleShot(150, lambda p=stashed_page: self._restore_after_show(p))
+
+    def _restore_after_show(self, page_idx: int):
+        if self.doc is None or not self.page_widgets:
+            return
+        # Use goto_page so it works correctly across all view modes and
+        # accounts for the post-reflow layout. goto_page clamps to valid range.
+        self.goto_page(page_idx)
+
     def wheelEvent(self, e):
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             if e.angleDelta().y() > 0:
@@ -1332,26 +1875,100 @@ class PdfViewer(QScrollArea):
     # ------------------------------------------------------------------
     # Thumbnails request
     # ------------------------------------------------------------------
-    def request_thumbnails(self):
-        if self.doc is None:
+    def request_thumbnails_for(self, page_indices: List[int]):
+        """Render thumbnails ON DEMAND for just the given pages.
+
+        Called by MainWindow as the thumbnail panel scrolls. Avoids the old
+        approach of queuing N tasks upfront, which choked the worker for
+        large PDFs (5000 pages -> 5000 lock-protected queue inserts every
+        time a tab was switched).
+        """
+        if self.doc is None or not page_indices:
             return
         mode = self._render_color_mode()
-        for i in range(self.doc.page_count):
+        n = self.doc.page_count
+        for rank, i in enumerate(page_indices):
+            if i < 0 or i >= n:
+                continue
             key = RenderKey.make(i, 0.18, 0, mode)
             cached = self.thumb_cache.get(key)
             if cached is not None:
-                # Push the cached one out via signal as if it just arrived
                 self.thumbnailReady.emit(i, cached.toImage())
             else:
-                self.worker.submit(key, priority=100 + i, is_thumb=True)
+                # Lower than visible-page renders (5-10) but higher than
+                # default 200 used for backlog work. Ranked by request order.
+                self.worker.submit(key, priority=150 + rank, is_thumb=True)
+
+    # Kept for backwards compatibility; now a no-op so callers don't accidentally
+    # queue thousands of renders. Use request_thumbnails_for(visible_pages).
+    def request_thumbnails(self):
+        pass
+
+    # ------------------------------------------------------------------
+    # Read aloud
+    # ------------------------------------------------------------------
+    def get_page_words(self, page_index: int) -> List["OcrWord"]:
+        """Best-effort word extraction: native PDF text first, OCR cache
+        second. Returns [] only for pages that have neither."""
+        if self.doc is None:
+            return []
+        try:
+            page = self.doc.load_page(page_index)
+        except Exception:
+            return []
+        words = _extract_page_words(page)
+        if words:
+            return words
+        cached = self._ocr_words_cache.get(page_index)
+        if cached:
+            return cached
+        return []
+
+    def get_auto_ocr(self) -> "AutoOcrController":
+        """Lazy-create the AutoOcrController for this viewer."""
+        if not hasattr(self, "_auto_ocr") or self._auto_ocr is None:
+            self._auto_ocr = AutoOcrController(self, parent=self)
+        return self._auto_ocr
+
+    def get_tts(self) -> "ReadAloudController":
+        """Lazy-create the ReadAloudController for this viewer."""
+        if not hasattr(self, "_tts") or self._tts is None:
+            self._tts = ReadAloudController(self, self)
+            self._tts.sentenceHighlight.connect(self._on_tts_highlight)
+            self._tts.highlightCleared.connect(self._on_tts_highlight_cleared)
+            self._tts.statusMessage.connect(self.statusMessage)
+        return self._tts
+
+    def _on_tts_highlight(self, page_index: int, _sentence_idx: int, rects: list):
+        # Clear any old highlight on a different page
+        for w in self.page_widgets:
+            if w.page_index != page_index and w.tts_hits:
+                w.set_tts_hits([])
+        widget = self._widget_for_page(page_index)
+        if widget is not None:
+            widget.set_tts_hits(rects)
+
+    def _on_tts_highlight_cleared(self):
+        for w in self.page_widgets:
+            if w.tts_hits:
+                w.set_tts_hits([])
 
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
     def shutdown(self):
+        if hasattr(self, "_auto_ocr") and self._auto_ocr is not None:
+            try:
+                self._auto_ocr.shutdown()
+            except Exception:
+                pass
+        if hasattr(self, "_tts") and self._tts is not None:
+            try:
+                self._tts.shutdown()
+            except Exception:
+                pass
         self.worker.stop()
-        self.worker_thread.quit()
-        self.worker_thread.wait(1500)
+        self.worker.join(timeout=1.5)
 
 
 # ===========================================================================
@@ -1361,23 +1978,83 @@ class PdfViewer(QScrollArea):
 
 class ThumbnailPanel(QListWidget):
     pageRequested = pyqtSignal(int)
+    # Emitted (debounced) with the list of page indices currently visible in
+    # the thumbnail panel. MainWindow uses this to render thumbnails on demand
+    # instead of queuing thousands of render jobs upfront.
+    visiblePagesChanged = pyqtSignal(list)
+
+    # Size of the preview icon and the fixed row/cell each thumbnail occupies.
+    THUMB_ICON = QSize(140, 180)
+    # Cell = icon + padding + a line for the "Page N" caption underneath.
+    CELL_SIZE = QSize(160, 220)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setIconSize(QSize(140, 180))
-        self.setSpacing(2)
-        self.setUniformItemSizes(False)
+        self.setIconSize(self.THUMB_ICON)
+        # Icon-above-text layout, centered - like a classic thumbnail strip.
+        self.setViewMode(QListWidget.ViewMode.IconMode)
+        self.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.setMovement(QListWidget.Movement.Static)
+        self.setFlow(QListWidget.Flow.TopToBottom)
+        self.setWrapping(False)
+        self.setSpacing(6)
+        self.setUniformItemSizes(True)
+        self.setWordWrap(True)
         self.itemClicked.connect(self._on_clicked)
         self._items_by_page: Dict[int, QListWidgetItem] = {}
+        self._populate_pending: int = 0
+
+        # Debounce visible-page emissions during scroll so we don't flood
+        # the render worker with re-prioritised tasks.
+        self._vis_timer = QTimer(self)
+        self._vis_timer.setSingleShot(True)
+        self._vis_timer.setInterval(60)
+        self._vis_timer.timeout.connect(self._emit_visible_pages)
+        self.verticalScrollBar().valueChanged.connect(
+            lambda _v: self._vis_timer.start()
+        )
+        # Builds items in chunks for very large documents.
+        self._populate_timer = QTimer(self)
+        self._populate_timer.setSingleShot(False)
+        self._populate_timer.timeout.connect(self._populate_chunk)
+
+    def _new_item(self, i: int) -> QListWidgetItem:
+        item = QListWidgetItem(f"Page {i + 1}")
+        item.setData(Qt.ItemDataRole.UserRole, i)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+        # Reserve the full cell so the preview image has room to display even
+        # before it's rendered (otherwise rows collapse to text height and the
+        # thumbnail never becomes visible).
+        item.setSizeHint(self.CELL_SIZE)
+        return item
 
     def populate_placeholders(self, n: int):
         self.clear()
         self._items_by_page = {}
-        for i in range(n):
-            item = QListWidgetItem(f"Page {i + 1}")
-            item.setData(Qt.ItemDataRole.UserRole, i)
+        self._populate_timer.stop()
+        self._populate_pending = n
+        self._populate_next = 0
+        # Build the first batch now so the strip appears immediately, then the
+        # rest in the background - creating thousands of items at once would
+        # block the GUI thread on large books.
+        self._populate_chunk(first=True)
+        if self._populate_next < n:
+            self._populate_timer.start(0)
+        # Trigger an initial visibility emit once Qt has laid out the rows.
+        QTimer.singleShot(50, self._emit_visible_pages)
+
+    def _populate_chunk(self, first: bool = False):
+        n = self._populate_pending
+        batch = 60 if first else 120
+        end = min(self._populate_next + batch, n)
+        for i in range(self._populate_next, end):
+            item = self._new_item(i)
             self.addItem(item)
             self._items_by_page[i] = item
+        self._populate_next = end
+        if end >= n:
+            self._populate_timer.stop()
+            self._vis_timer.start()
 
     def set_thumbnail(self, page_index: int, image: QImage):
         item = self._items_by_page.get(page_index)
@@ -1387,6 +2064,48 @@ class ThumbnailPanel(QListWidget):
 
     def _on_clicked(self, item: QListWidgetItem):
         self.pageRequested.emit(item.data(Qt.ItemDataRole.UserRole))
+
+    def _emit_visible_pages(self):
+        """Find the index range of items visible in the viewport and emit it."""
+        if self.count() == 0:
+            return
+        vp = self.viewport().rect()
+        # Items are centered in IconMode, so probe the horizontal CENTER of the
+        # viewport (the left edge can fall in the empty margin and return None).
+        cx = vp.center().x()
+        first_item = self.itemAt(cx, vp.top() + 1)
+        last_item = self.itemAt(cx, vp.bottom() - 1)
+        # Fall back to scanning a few probe points if the exact edges missed.
+        if first_item is None:
+            for dy in range(0, vp.height(), 20):
+                first_item = self.itemAt(cx, vp.top() + dy)
+                if first_item is not None:
+                    break
+        if last_item is None:
+            for dy in range(0, vp.height(), 20):
+                last_item = self.itemAt(cx, vp.bottom() - 1 - dy)
+                if last_item is not None:
+                    break
+        if first_item is None and last_item is None:
+            # Nothing resolved yet (e.g. layout not ready) - just render the
+            # first screenful so something shows.
+            first, last = 0, min(self.count() - 1, 12)
+        else:
+            first = self.row(first_item) if first_item else 0
+            last = self.row(last_item) if last_item else self.count() - 1
+        # Pad a bit so neighbouring thumbs are pre-rendered for smooth scroll.
+        PAD = 4
+        first = max(0, first - PAD)
+        last = min(self.count() - 1, last + PAD)
+        self.visiblePagesChanged.emit(list(range(first, last + 1)))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._vis_timer.start()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._vis_timer.start()
 
 
 class OutlinePanel(QTreeWidget):
@@ -1632,6 +2351,650 @@ def _ocr_page_text(page: fitz.Page, language: str = "eng", dpi: int = 300,
     return page.get_text("text", textpage=tp)
 
 
+# ---------------------------------------------------------------------------
+# Read-aloud helpers (OCR with word-level bounding boxes + sentence grouping)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OcrWord:
+    """A single OCRed word with its bounding box in PDF-point coordinates."""
+    text: str
+    rect: fitz.Rect          # in PDF points (matches page.rect coords)
+
+
+@dataclass
+class OcrSentence:
+    """A run of OCR'd words that form one TTS-readable sentence."""
+    text: str
+    rects: List[fitz.Rect]   # one rect per visual line covered by this sentence
+
+
+def _extract_page_words(page: fitz.Page) -> List[OcrWord]:
+    """Return word-level boxes from a page using PyMuPDF's native text layer.
+
+    No external dependencies, no OCR install required, and effectively
+    instant - we just read the text already embedded in the PDF. Pages
+    with no embedded text (pure-image scans) return an empty list.
+
+    PyMuPDF's get_text("words") returns tuples of:
+        (x0, y0, x1, y1, word, block_no, line_no, word_no)
+    in PDF-point coordinates - exactly what we need.
+    """
+    try:
+        raw = page.get_text("words")
+    except Exception:
+        return []
+    words: List[OcrWord] = []
+    for tup in raw:
+        if len(tup) < 5:
+            continue
+        x0, y0, x1, y1, txt = tup[0], tup[1], tup[2], tup[3], tup[4]
+        txt = (txt or "").strip()
+        if not txt:
+            continue
+        words.append(OcrWord(text=txt, rect=fitz.Rect(x0, y0, x1, y1)))
+    return words
+
+
+def _ocr_page_words_via_tesseract(page: fitz.Page, language: str = "eng",
+                                  dpi: int = 220) -> List[OcrWord]:
+    """Run Tesseract on the rendered page and return word-level boxes in PDF
+    points. Returns [] if pytesseract / Tesseract / PIL are unavailable, or
+    if Tesseract fails for any reason. Used by the auto-OCR background pass
+    for pages whose native text layer is empty."""
+    try:
+        import pytesseract  # type: ignore
+    except ImportError:
+        return []
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return []
+
+    zoom = dpi / 72.0
+    try:
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        data = pytesseract.image_to_data(
+            img, lang=language, output_type=pytesseract.Output.DICT
+        )
+    except Exception:
+        return []
+
+    words: List[OcrWord] = []
+    n = len(data.get("text", []))
+    for i in range(n):
+        txt = (data["text"][i] or "").strip()
+        if not txt:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except (ValueError, KeyError):
+            conf = -1.0
+        if conf != -1.0 and conf < 30:    # drop very low-confidence noise
+            continue
+        x = data["left"][i]
+        y = data["top"][i]
+        w = data["width"][i]
+        h = data["height"][i]
+        rect = fitz.Rect(x / zoom, y / zoom, (x + w) / zoom, (y + h) / zoom)
+        words.append(OcrWord(text=txt, rect=rect))
+    return words
+
+
+_SENTENCE_END_RE = re.compile(r'[.!?](?:["\'\u201d\u2019)\]]+)?\s*$')
+
+
+def _group_words_into_sentences(words: List[OcrWord]) -> List[OcrSentence]:
+    """Group OCRed words into sentence-sized chunks for TTS playback.
+
+    Splits on . ! ? terminators. Also forces a split at a large vertical gap
+    so a paragraph break in a scan doesn't produce a single 800-word run-on
+    that the highlight box can't sensibly cover.
+    """
+    if not words:
+        return []
+
+    sentences: List[OcrSentence] = []
+    cur_words: List[OcrWord] = []
+
+    def flush():
+        if not cur_words:
+            return
+        text = " ".join(w.text for w in cur_words).strip()
+        if not text:
+            cur_words.clear()
+            return
+        # Group word rects per visual line (rects whose y-range overlaps).
+        lines: List[List[fitz.Rect]] = []
+        for w in cur_words:
+            placed = False
+            for line in lines:
+                # Compare against the line's avg y-center.
+                ly = sum((r.y0 + r.y1) for r in line) / (2 * len(line))
+                wy = (w.rect.y0 + w.rect.y1) / 2
+                if abs(ly - wy) < (w.rect.y1 - w.rect.y0) * 0.6:
+                    line.append(w.rect)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([w.rect])
+        # Union the rects of each line into one bbox per line.
+        line_rects: List[fitz.Rect] = []
+        for line in lines:
+            x0 = min(r.x0 for r in line)
+            y0 = min(r.y0 for r in line)
+            x1 = max(r.x1 for r in line)
+            y1 = max(r.y1 for r in line)
+            line_rects.append(fitz.Rect(x0, y0, x1, y1))
+        sentences.append(OcrSentence(text=text, rects=line_rects))
+        cur_words.clear()
+
+    prev_word: Optional[OcrWord] = None
+    for w in words:
+        # Force a flush on a large vertical gap (paragraph break).
+        if prev_word is not None and cur_words:
+            line_h = max(1.0, prev_word.rect.y1 - prev_word.rect.y0)
+            vertical_gap = w.rect.y0 - prev_word.rect.y1
+            if vertical_gap > line_h * 1.6:
+                flush()
+        cur_words.append(w)
+        if _SENTENCE_END_RE.search(w.text):
+            flush()
+        prev_word = w
+    flush()
+    return sentences
+
+
+# ===========================================================================
+# Read Aloud  (Text-to-speech with sentence-level highlighting)
+# ===========================================================================
+
+# Cache the voices list at module level - querying SAPI is cheap but creates
+# a transient COM-affinity issue if done from a worker thread. Doing it once
+# from the GUI thread (and caching) sidesteps the problem entirely.
+_TTS_VOICES_CACHE: Optional[List[Tuple[str, str]]] = None
+
+
+def _list_tts_voices() -> List[Tuple[str, str]]:
+    """Return [(voice_id, friendly_name), ...] for installed SAPI voices.
+    Cached after the first successful call."""
+    global _TTS_VOICES_CACHE
+    if _TTS_VOICES_CACHE is not None:
+        return _TTS_VOICES_CACHE
+    try:
+        import pyttsx3
+        engine = pyttsx3.init()
+        voices = engine.getProperty("voices") or []
+        result = [(v.id, v.name) for v in voices]
+        # Release the engine; the actual TTS playback will create its own.
+        try:
+            engine.stop()
+        except Exception:
+            pass
+        _TTS_VOICES_CACHE = result
+        return result
+    except Exception:
+        _TTS_VOICES_CACHE = []
+        return []
+
+
+class TtsWorker(QObject):
+    """Owns the pyttsx3 engine on its own QThread.
+
+    pyttsx3 is synchronous (engine.say + engine.runAndWait). We feed one
+    utterance at a time so the controller can pause/skip between sentences
+    without trying to interrupt SAPI mid-utterance (which is unreliable).
+    """
+
+    # Tells the controller this utterance just *started* speaking.
+    utteranceStarted = pyqtSignal(int)   # sentence index
+    # Fired after a sentence has finished playing.
+    utteranceFinished = pyqtSignal(int)  # sentence index
+    # Fired once after a stop() request - so the controller can clean up state.
+    stopped = pyqtSignal()
+    # Engine could not be initialised (no SAPI voices, etc.)
+    initFailed = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._engine = None
+        self._lock = threading.Lock()
+        self._cur_text: Optional[str] = None
+        self._cur_index: int = -1
+        self._stop_requested = False
+
+    @pyqtSlot()
+    def init_engine(self):
+        try:
+            import pyttsx3
+            self._engine = pyttsx3.init()
+        except Exception as e:
+            self.initFailed.emit(str(e))
+            return
+
+    @pyqtSlot(int)
+    def set_rate(self, rate: int):
+        if self._engine is None:
+            return
+        try:
+            self._engine.setProperty("rate", rate)
+        except Exception:
+            pass
+
+    @pyqtSlot(str)
+    def set_voice(self, voice_id: str):
+        if self._engine is None or not voice_id:
+            return
+        try:
+            self._engine.setProperty("voice", voice_id)
+        except Exception:
+            pass
+
+    def list_voices(self) -> List[Tuple[str, str]]:
+        """Return [(voice_id, friendly_name), ...]."""
+        if self._engine is None:
+            return []
+        try:
+            return [(v.id, v.name) for v in self._engine.getProperty("voices")]
+        except Exception:
+            return []
+
+    @pyqtSlot(str, int)
+    def speak(self, text: str, sentence_index: int):
+        """Speak one utterance synchronously. Returns to event loop afterwards."""
+        if self._engine is None:
+            self.utteranceFinished.emit(sentence_index)
+            return
+        with self._lock:
+            self._stop_requested = False
+            self._cur_text = text
+            self._cur_index = sentence_index
+        self.utteranceStarted.emit(sentence_index)
+        try:
+            self._engine.say(text)
+            self._engine.runAndWait()
+        except Exception:
+            pass
+        with self._lock:
+            self._cur_text = None
+            self._cur_index = -1
+        if self._stop_requested:
+            self.stopped.emit()
+        else:
+            self.utteranceFinished.emit(sentence_index)
+
+    @pyqtSlot()
+    def request_stop(self):
+        """Ask the engine to stop the current utterance ASAP."""
+        with self._lock:
+            self._stop_requested = True
+        if self._engine is not None:
+            try:
+                self._engine.stop()
+            except Exception:
+                pass
+
+
+class AutoOcrController(QObject):
+    """Background OCR pass that runs after a PDF opens.
+
+    Walks every page, skips ones with native selectable text, and OCRs the
+    rest with Tesseract. Results are cached per-page on the viewer so
+    read-aloud / search can use them without re-running OCR.
+
+    Silently does nothing if Tesseract isn't available.
+    """
+
+    progress = pyqtSignal(int, int)        # done, total (only OCRable pages)
+    finished = pyqtSignal(int)              # number of pages actually OCR'd
+    skipped  = pyqtSignal(str)              # reason (e.g. "Tesseract not found")
+
+    def __init__(self, viewer: "PdfViewer", language: str = "eng", parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.language = language
+        self._cancel = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._doc_path: Optional[str] = None
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self):
+        """Begin scanning. Safe to call repeatedly - in-flight runs are aborted."""
+        if self.is_running():
+            self.cancel()
+            self._thread.join(timeout=1.0)
+        if self.viewer.doc is None or self.viewer.doc_path is None:
+            return
+        # Quick "is Tesseract installed?" check using the existing helper.
+        ok, _ = _tesseract_available()
+        if not ok:
+            self.skipped.emit("Tesseract not installed")
+            return
+        self._doc_path = self.viewer.doc_path
+        self._cancel.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def shutdown(self):
+        self.cancel()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+
+    # ------------------------------------------------------------------
+    def _run(self):
+        """Worker entry point. Opens its own fitz.Document handle so we never
+        share a Document instance between threads (PyMuPDF is not safe for
+        concurrent access to the same Document)."""
+        path = self._doc_path
+        if path is None:
+            return
+        try:
+            doc = fitz.open(path)
+        except Exception:
+            return
+
+        try:
+            # First pass: list pages that need OCR (no native text).
+            #
+            # PERFORMANCE: get_text() fully parses each page's content stream.
+            # On very large PDFs (thousands of pages) walking every page here
+            # is CPU-bound and, because PyMuPDF holds the GIL for stretches,
+            # it starves the render-worker thread so page/thumbnail images
+            # never appear promptly. We therefore:
+            #   * short-circuit as soon as we've confirmed the document clearly
+            #     has a native text layer (most digital PDFs), and
+            #   * yield the GIL periodically so the UI/render threads breathe.
+            import time
+            todo: List[int] = []
+            pages_with_text = 0
+            total_pages = doc.page_count
+            for i in range(total_pages):
+                if self._cancel.is_set():
+                    return
+                try:
+                    page = doc.load_page(i)
+                    raw = page.get_text("words")
+                except Exception:
+                    raw = []
+                if not raw:
+                    todo.append(i)
+                else:
+                    pages_with_text += 1
+                # Breathe every few pages so the GUI + render worker aren't
+                # starved of the GIL on huge documents.
+                if (i & 0x1F) == 0:
+                    time.sleep(0)
+                # Early exit: if the first stretch of pages all have real text,
+                # this is a normal digital PDF - no OCR pre-scan is worthwhile.
+                # Bail out so we don't parse all N pages up front.
+                if i >= 24 and not todo and pages_with_text > 24:
+                    QTimer.singleShot(0, lambda: self.finished.emit(0))
+                    return
+
+            total = len(todo)
+            if total == 0:
+                # Hand back to GUI thread on the main event loop.
+                QTimer.singleShot(0, lambda: self.finished.emit(0))
+                return
+
+            QTimer.singleShot(0, lambda t=total: self.progress.emit(0, t))
+
+            done = 0
+            for page_idx in todo:
+                if self._cancel.is_set():
+                    break
+                # Skip if some other code already populated the cache (e.g.
+                # the user manually OCR'd a page from the menu).
+                if page_idx in self.viewer._ocr_words_cache:
+                    done += 1
+                    continue
+                try:
+                    page = doc.load_page(page_idx)
+                    words = _ocr_page_words_via_tesseract(
+                        page, language=self.language
+                    )
+                except Exception:
+                    words = []
+                # Stash the result on the viewer (dict assignment is atomic
+                # enough in CPython that we don't need a lock for this case).
+                self.viewer._ocr_words_cache[page_idx] = words
+                done += 1
+                QTimer.singleShot(
+                    0,
+                    lambda d=done, t=total: self.progress.emit(d, t),
+                )
+            QTimer.singleShot(0, lambda d=done: self.finished.emit(d))
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+
+
+class ReadAloudController(QObject):
+    """Coordinates page extraction (OCR) and TTS playback for one PdfViewer.
+
+    State machine: IDLE -> EXTRACTING -> PLAYING <-> PAUSED -> IDLE.
+    Emits highlight updates so PdfPageWidget can paint the active sentence.
+    """
+
+    STATE_IDLE = "idle"
+    STATE_EXTRACTING = "extracting"
+    STATE_PLAYING = "playing"
+    STATE_PAUSED = "paused"
+
+    # (page_index, sentence_index, sentence_rects_in_pdf_pts)
+    sentenceHighlight = pyqtSignal(int, int, list)
+    # Called when nothing is highlighted (idle, end-of-page, between sentences).
+    highlightCleared = pyqtSignal()
+    stateChanged = pyqtSignal(str)
+    statusMessage = pyqtSignal(str)
+
+    def __init__(self, viewer: "PdfViewer", parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.language = "eng"
+        self.rate = 180
+
+        self._state = self.STATE_IDLE
+        self._page_index = -1
+        self._sentences: List[OcrSentence] = []
+        self._cursor: int = 0    # next sentence to speak
+        self._page_cache: Dict[int, List[OcrSentence]] = {}
+
+        # TTS thread
+        self._thread = QThread()
+        self._worker = TtsWorker()
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.init_engine)
+        self._worker.utteranceStarted.connect(self._on_utterance_started)
+        self._worker.utteranceFinished.connect(self._on_utterance_finished)
+        self._worker.stopped.connect(self._on_engine_stopped)
+        self._worker.initFailed.connect(self._on_init_failed)
+        self._thread.start()
+
+    # ------------------------------------------------------------------
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def is_playing(self) -> bool:
+        return self._state == self.STATE_PLAYING
+
+    def is_paused(self) -> bool:
+        return self._state == self.STATE_PAUSED
+
+    # ------------------------------------------------------------------
+    def play_current_page(self):
+        """Begin reading from the user's current page (or resume if paused)."""
+        if self._state == self.STATE_PAUSED:
+            self._set_state(self.STATE_PLAYING)
+            self._speak_next()
+            return
+        if self._state in (self.STATE_PLAYING, self.STATE_EXTRACTING):
+            return
+        if self.viewer.doc is None:
+            return
+        page_idx = self.viewer.last_known_page()
+        self._start_page(page_idx, sentence_offset=0)
+
+    def pause(self):
+        if self._state != self.STATE_PLAYING:
+            return
+        self._set_state(self.STATE_PAUSED)
+        self._worker.request_stop()  # stops mid-utterance; we resume from same sentence
+
+    def stop(self):
+        if self._state == self.STATE_IDLE:
+            return
+        self._set_state(self.STATE_IDLE)
+        self._sentences = []
+        self._cursor = 0
+        self._page_index = -1
+        self.highlightCleared.emit()
+        self._worker.request_stop()
+
+    def set_rate(self, rate: int):
+        self.rate = max(80, min(400, rate))
+        QTimer.singleShot(0, lambda: self._worker.set_rate(self.rate))
+
+    def set_voice(self, voice_id: str):
+        QTimer.singleShot(0, lambda: self._worker.set_voice(voice_id))
+
+    def list_voices(self) -> List[Tuple[str, str]]:
+        # Use the module-level cached query: safer than asking the worker
+        # thread (SAPI/COM has thread-affinity quirks).
+        return _list_tts_voices()
+
+    def shutdown(self):
+        self.stop()
+        self._thread.quit()
+        self._thread.wait(1500)
+
+    # ------------------------------------------------------------------
+    def _set_state(self, new_state: str):
+        if new_state == self._state:
+            return
+        self._state = new_state
+        self.stateChanged.emit(new_state)
+
+    def _start_page(self, page_idx: int, sentence_offset: int = 0):
+        if self.viewer.doc is None:
+            return
+        self._page_index = page_idx
+        self._cursor = sentence_offset
+        cached = self._page_cache.get(page_idx)
+        if cached is not None:
+            self._sentences = cached
+            self._set_state(self.STATE_PLAYING)
+            self._worker.set_rate(self.rate)
+            self._speak_next()
+            return
+        # Extract sentences in a background thread so the UI doesn't freeze
+        # while OCR runs (can be a few seconds per page).
+        self._set_state(self.STATE_EXTRACTING)
+        self.statusMessage.emit(f"Read aloud: extracting page {page_idx + 1}…")
+        QTimer.singleShot(0, lambda p=page_idx: self._extract_async(p))
+
+    def _extract_async(self, page_idx: int):
+        # Pull words from the PDF (native text first, OCR cache second) on a
+        # worker thread so the GUI stays responsive.
+        def do_extract():
+            try:
+                words = self.viewer.get_page_words(page_idx)
+                sentences = _group_words_into_sentences(words)
+            except Exception:
+                sentences = []
+            # Hand back to the GUI thread.
+            QTimer.singleShot(
+                0, lambda s=sentences, p=page_idx: self._on_extracted(p, s)
+            )
+        threading.Thread(target=do_extract, daemon=True).start()
+
+    def _on_extracted(self, page_idx: int, sentences: List[OcrSentence]):
+        # User may have stopped while extraction was running.
+        if self._state == self.STATE_IDLE or self._page_index != page_idx:
+            return
+        self._page_cache[page_idx] = sentences
+        self._sentences = sentences
+        if not sentences:
+            # Page has no embedded text (likely an image-only scan). Skip ahead.
+            self.statusMessage.emit(
+                f"Page {page_idx + 1} has no extractable text - skipping"
+            )
+            self._advance_page()
+            return
+        self._set_state(self.STATE_PLAYING)
+        self._worker.set_rate(self.rate)
+        self._speak_next()
+
+    def _speak_next(self):
+        if self._state != self.STATE_PLAYING:
+            return
+        if self._cursor >= len(self._sentences):
+            self._advance_page()
+            return
+        sent = self._sentences[self._cursor]
+        # Emit highlight before queuing speech.
+        self.sentenceHighlight.emit(self._page_index, self._cursor, sent.rects)
+        # Auto-scroll viewer to the page being read.
+        if self.viewer.doc is not None:
+            cur_page = self.viewer.last_known_page()
+            if cur_page != self._page_index:
+                self.viewer.goto_page(self._page_index)
+        # Queue the utterance on the worker thread.
+        QTimer.singleShot(
+            0,
+            lambda t=sent.text, i=self._cursor: self._worker.speak(t, i),
+        )
+
+    def _advance_page(self):
+        if self.viewer.doc is None:
+            self.stop()
+            return
+        next_page = self._page_index + 1
+        if next_page >= self.viewer.doc.page_count:
+            self.statusMessage.emit("Read aloud: end of document")
+            self.stop()
+            return
+        self._start_page(next_page, sentence_offset=0)
+
+    # ------------------------------------------------------------------
+    # Slots from TtsWorker
+    # ------------------------------------------------------------------
+    @pyqtSlot(int)
+    def _on_utterance_started(self, sentence_index: int):
+        # Already highlighted in _speak_next; nothing extra to do here.
+        pass
+
+    @pyqtSlot(int)
+    def _on_utterance_finished(self, sentence_index: int):
+        if self._state != self.STATE_PLAYING:
+            return
+        self._cursor = sentence_index + 1
+        self._speak_next()
+
+    @pyqtSlot()
+    def _on_engine_stopped(self):
+        # Worker confirmed it stopped a request_stop(). If we're paused, the
+        # cursor stays put so play() resumes the same sentence; if stopped,
+        # state is already IDLE.
+        if self._state == self.STATE_PAUSED:
+            self.highlightCleared.emit()
+
+    @pyqtSlot(str)
+    def _on_init_failed(self, msg: str):
+        self.statusMessage.emit(f"Read aloud unavailable: {msg}")
+        self._set_state(self.STATE_IDLE)
+
+
 class OcrResultDialog(QDialog):
     """Shows OCR'd text with copy / save buttons."""
 
@@ -1673,6 +3036,972 @@ class OcrResultDialog(QDialog):
 
 
 # ===========================================================================
+# Audiobook  (natural-sounding TTS export of selected pages via edge-tts)
+# ===========================================================================
+
+# edge-tts voice list is fetched once and cached. These are a curated subset
+# of Microsoft's neural voices - full list is fetched live when online.
+_EDGE_TTS_VOICES_CACHE: Optional[List[Tuple[str, str]]] = None
+
+# A small, sensible default set shown immediately so the UI isn't empty while
+# (or if) the live voice list can't be fetched. (short_name, friendly_label)
+_EDGE_TTS_DEFAULT_VOICES: List[Tuple[str, str]] = [
+    ("en-US-AriaNeural",     "Aria — US English (Female)"),
+    ("en-US-GuyNeural",      "Guy — US English (Male)"),
+    ("en-US-JennyNeural",    "Jenny — US English (Female)"),
+    ("en-US-MichelleNeural", "Michelle — US English (Female)"),
+    ("en-US-RogerNeural",    "Roger — US English (Male)"),
+    ("en-GB-SoniaNeural",    "Sonia — UK English (Female)"),
+    ("en-GB-RyanNeural",     "Ryan — UK English (Male)"),
+    ("en-AU-NatashaNeural",  "Natasha — Australian English (Female)"),
+    ("en-IN-NeerjaNeural",   "Neerja — Indian English (Female)"),
+]
+
+
+def edge_tts_available() -> bool:
+    """True if the edge-tts package is importable."""
+    try:
+        import edge_tts  # type: ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _fetch_edge_tts_voices() -> List[Tuple[str, str]]:
+    """Fetch the live list of edge-tts neural voices (needs internet).
+
+    Returns [(short_name, friendly_label), ...]. Falls back to the built-in
+    default list on any failure (offline, package missing, etc.). Cached.
+    """
+    global _EDGE_TTS_VOICES_CACHE
+    if _EDGE_TTS_VOICES_CACHE is not None:
+        return _EDGE_TTS_VOICES_CACHE
+    voices: List[Tuple[str, str]] = []
+    try:
+        import asyncio
+        import edge_tts  # type: ignore
+
+        async def _list():
+            return await edge_tts.list_voices()
+
+        loop = asyncio.new_event_loop()
+        try:
+            raw = loop.run_until_complete(_list())
+        finally:
+            loop.close()
+        for v in raw:
+            short = v.get("ShortName", "")
+            if not short:
+                continue
+            gender = v.get("Gender", "")
+            locale = v.get("Locale", "")
+            friendly = short.split("-")[-1].replace("Neural", "")
+            label = f"{friendly} — {locale} ({gender})"
+            voices.append((short, label))
+        voices.sort(key=lambda t: t[1])
+    except Exception:
+        voices = []
+    if not voices:
+        voices = list(_EDGE_TTS_DEFAULT_VOICES)
+    _EDGE_TTS_VOICES_CACHE = voices
+    return voices
+
+
+class AudiobookWorker(QObject):
+    """Generates an audiobook file from text using edge-tts on a background
+    thread with its own asyncio event loop.
+
+    edge-tts streams synthesized neural-voice audio (MP3) from Microsoft's
+    cloud, so this REQUIRES an internet connection. Failures (offline,
+    package missing) are reported via the `failed` signal.
+    """
+
+    progress = pyqtSignal(int, int, str)   # done, total, human status
+    finished = pyqtSignal(str)             # output file path
+    failed = pyqtSignal(str)               # error message
+
+    def __init__(self, chunks: List[str], voice: str, rate_pct: int,
+                 out_path: str, parent=None):
+        super().__init__(parent)
+        self._chunks = chunks           # one string per selected page
+        self._voice = voice
+        self._rate_pct = rate_pct       # -50..+100, edge-tts "rate" percent
+        self._out_path = out_path
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            import edge_tts  # type: ignore
+        except Exception:
+            self.failed.emit(
+                "The 'edge-tts' package is not installed.\n\n"
+                "Install it with:\n    pip install edge-tts"
+            )
+            return
+
+        import asyncio
+        import tempfile
+
+        rate_str = f"{'+' if self._rate_pct >= 0 else ''}{self._rate_pct}%"
+        total = len(self._chunks)
+
+        async def _synth_all(mp3_path: str):
+            # Write all pages sequentially into one MP3 stream.
+            with open(mp3_path, "wb") as out:
+                for i, text in enumerate(self._chunks):
+                    if self._cancel.is_set():
+                        raise RuntimeError("cancelled")
+                    self.progress.emit(i, total, f"Synthesizing page {i + 1} of {total}…")
+                    text = (text or "").strip()
+                    if not text:
+                        continue
+                    communicate = edge_tts.Communicate(
+                        text, self._voice, rate=rate_str
+                    )
+                    async for chunk in communicate.stream():
+                        if self._cancel.is_set():
+                            raise RuntimeError("cancelled")
+                        if chunk.get("type") == "audio":
+                            out.write(chunk["data"])
+
+        loop = asyncio.new_event_loop()
+        tmp_mp3 = None
+        try:
+            asyncio.set_event_loop(loop)
+            want_wav = self._out_path.lower().endswith(".wav")
+            if want_wav:
+                fd, tmp_mp3 = tempfile.mkstemp(suffix=".mp3")
+                os.close(fd)
+                mp3_target = tmp_mp3
+            else:
+                mp3_target = self._out_path
+
+            loop.run_until_complete(_synth_all(mp3_target))
+
+            if self._cancel.is_set():
+                self.failed.emit("Cancelled.")
+                return
+
+            if want_wav:
+                self.progress.emit(total, total, "Converting to WAV…")
+                if not self._convert_mp3_to_wav(tmp_mp3, self._out_path):
+                    self.failed.emit(
+                        "Generated MP3 but could not convert to WAV.\n"
+                        "WAV output needs ffmpeg on PATH. The MP3 is available "
+                        "if you choose MP3 output instead."
+                    )
+                    return
+
+            self.progress.emit(total, total, "Done.")
+            self.finished.emit(self._out_path)
+        except RuntimeError as e:
+            if str(e) == "cancelled":
+                self.failed.emit("Cancelled.")
+            else:
+                self.failed.emit(str(e))
+        except Exception as e:
+            msg = str(e)
+            # Common offline signature from aiohttp / websockets.
+            if any(s in msg.lower() for s in ("getaddrinfo", "connect", "network", "resolve", "temporary failure")):
+                msg = ("Could not reach the Microsoft neural-voice service.\n\n"
+                       "edge-tts requires an internet connection. Please check "
+                       "your connection and try again.\n\nDetails: " + msg)
+            self.failed.emit(msg)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            if tmp_mp3 and os.path.isfile(tmp_mp3):
+                try:
+                    os.remove(tmp_mp3)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _convert_mp3_to_wav(mp3_path: str, wav_path: str) -> bool:
+        """Convert MP3 -> WAV using ffmpeg if available. Returns success."""
+        import shutil
+        import subprocess
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return False
+        try:
+            creationflags = 0
+            if sys.platform.startswith("win"):
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                [ffmpeg, "-y", "-i", mp3_path, wav_path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            return os.path.isfile(wav_path)
+        except Exception:
+            return False
+
+
+class _PageTile(QWidget):
+    """A selectable page-preview tile: checkbox + label + thumbnail image."""
+
+    toggled = pyqtSignal()
+
+    def __init__(self, page_index: int, parent=None):
+        super().__init__(parent)
+        self.page_index = page_index
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
+
+        self.check = QCheckBox(f"Page {page_index + 1}")
+        self.check.toggled.connect(lambda _c: self.toggled.emit())
+        lay.addWidget(self.check, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.img = QLabel()
+        self.img.setFixedSize(QSize(150, 200))
+        self.img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img.setStyleSheet("border: 1px solid rgba(128,128,128,0.5);")
+        self.img.setText("…")
+        lay.addWidget(self.img, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+    def set_pixmap(self, pix: QPixmap):
+        self.img.setPixmap(pix.scaled(
+            self.img.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+
+    def is_checked(self) -> bool:
+        return self.check.isChecked()
+
+    def set_checked(self, on: bool):
+        self.check.setChecked(on)
+
+
+class AudiobookDialog(QDialog):
+    """Dialog to select PDF pages (with previews) and export them as a
+    natural-sounding audiobook (MP3/WAV) using edge-tts neural voices."""
+
+    THUMB_ZOOM = 0.35   # render scale for the preview thumbnails
+
+    def __init__(self, viewer: "PdfViewer", settings: QSettings, parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.doc = viewer.doc
+        self.settings = settings
+        self._tiles: List[_PageTile] = []
+        self._worker: Optional[AudiobookWorker] = None
+        self._thread: Optional[QThread] = None
+
+        self.setWindowTitle("Create Audiobook from Pages")
+        self.resize(760, 640)
+
+        root = QVBoxLayout(self)
+
+        # --- top: selection controls --------------------------------------
+        top = QHBoxLayout()
+        self.btn_all = QPushButton("Select All")
+        self.btn_none = QPushButton("Clear")
+        self.btn_all.clicked.connect(lambda: self._set_all(True))
+        self.btn_none.clicked.connect(lambda: self._set_all(False))
+        top.addWidget(self.btn_all)
+        top.addWidget(self.btn_none)
+        top.addSpacing(12)
+        top.addWidget(QLabel("Range:"))
+        self.range_edit = QLineEdit()
+        self.range_edit.setPlaceholderText("e.g. 1-5, 8, 12")
+        self.range_edit.setToolTip("Type a page range then click Apply, e.g. 1-5, 8, 12")
+        self.range_edit.returnPressed.connect(self._apply_range)
+        top.addWidget(self.range_edit, 1)
+        self.btn_range = QPushButton("Apply")
+        self.btn_range.clicked.connect(self._apply_range)
+        top.addWidget(self.btn_range)
+        root.addLayout(top)
+
+        # --- middle: scrollable thumbnail grid ----------------------------
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        grid_host = QWidget()
+        self.grid = QGridLayout(grid_host)
+        self.grid.setSpacing(10)
+        self.scroll.setWidget(grid_host)
+        root.addWidget(self.scroll, 1)
+
+        # --- bottom: voice / format / actions -----------------------------
+        opts = QHBoxLayout()
+        opts.addWidget(QLabel("Voice:"))
+        self.voice_combo = QComboBox()
+        self.voice_combo.setMinimumWidth(260)
+        opts.addWidget(self.voice_combo, 1)
+
+        opts.addWidget(QLabel("Speed:"))
+        self.speed_combo = QComboBox()
+        for label, pct in (("Slow", -25), ("Normal", 0), ("Fast", 25), ("Faster", 50)):
+            self.speed_combo.addItem(label, pct)
+        self.speed_combo.setCurrentIndex(1)
+        opts.addWidget(self.speed_combo)
+
+        opts.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("MP3", "mp3")
+        self.format_combo.addItem("WAV (needs ffmpeg)", "wav")
+        opts.addWidget(self.format_combo)
+        root.addLayout(opts)
+
+        self.status_lbl = QLabel("")
+        root.addWidget(self.status_lbl)
+
+        self.progress = QProgressDialog(self)
+        self.progress.setWindowTitle("Generating Audiobook")
+        self.progress.setCancelButtonText("Cancel")
+        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress.setMinimumDuration(0)
+        self.progress.reset()
+        self.progress.canceled.connect(self._cancel_generation)
+
+        actions = QHBoxLayout()
+        self.sel_count_lbl = QLabel("0 pages selected")
+        actions.addWidget(self.sel_count_lbl)
+        actions.addStretch(1)
+        self.btn_generate = QPushButton("Generate Audiobook…")
+        self.btn_generate.clicked.connect(self._generate)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.clicked.connect(self.reject)
+        actions.addWidget(self.btn_generate)
+        actions.addWidget(self.btn_close)
+        root.addLayout(actions)
+
+        self._populate_voices()
+        self._build_tiles()
+        # Preselect the current page for convenience.
+        cur = viewer.current_page_index()
+        if 0 <= cur < len(self._tiles):
+            self._tiles[cur].set_checked(True)
+        self._update_selection_count()
+        # Render previews lazily after the dialog is shown.
+        QTimer.singleShot(0, self._render_previews)
+
+    # ------------------------------------------------------------------
+    # Preferred default voice when the user hasn't chosen one yet.
+    DEFAULT_VOICE = "en-US-AriaNeural"
+
+    def _populate_voices(self):
+        voices = _fetch_edge_tts_voices()
+        saved = self.settings.value("audiobook_voice", "", type=str)
+        idx_saved = -1
+        idx_default = -1
+        idx_us = -1
+        for i, (short, label) in enumerate(voices):
+            self.voice_combo.addItem(label, short)
+            if saved and short == saved:
+                idx_saved = i
+            if short == self.DEFAULT_VOICE:
+                idx_default = i
+            if idx_us == -1 and short.startswith("en-US"):
+                idx_us = i
+        # Priority: user's saved choice > Aria (US) > any US English > first.
+        if idx_saved != -1:
+            idx_to_select = idx_saved
+        elif idx_default != -1:
+            idx_to_select = idx_default
+        elif idx_us != -1:
+            idx_to_select = idx_us
+        else:
+            idx_to_select = 0
+        self.voice_combo.setCurrentIndex(idx_to_select)
+
+    def _build_tiles(self):
+        cols = 4
+        for i in range(self.doc.page_count):
+            tile = _PageTile(i)
+            tile.toggled.connect(self._update_selection_count)
+            self._tiles.append(tile)
+            self.grid.addWidget(tile, i // cols, i % cols)
+
+    def _render_previews(self):
+        """Render each page to a small pixmap for its tile. Runs on the GUI
+        thread but pages are small; done in slices to stay responsive."""
+        if self.doc is None:
+            return
+        pending = list(range(len(self._tiles)))
+
+        def render_slice():
+            done = 0
+            while pending and done < 3:
+                i = pending.pop(0)
+                try:
+                    page = self.doc.load_page(i)
+                    mat = fitz.Matrix(self.THUMB_ZOOM, self.THUMB_ZOOM)
+                    pix = page.get_pixmap(matrix=mat, alpha=False)
+                    img = QImage(
+                        pix.samples, pix.width, pix.height, pix.stride,
+                        QImage.Format.Format_RGB888,
+                    ).copy()
+                    self._tiles[i].set_pixmap(QPixmap.fromImage(img))
+                except Exception:
+                    self._tiles[i].img.setText("(preview\nunavailable)")
+                done += 1
+            if pending:
+                QTimer.singleShot(0, render_slice)
+
+        render_slice()
+
+    # ------------------------------------------------------------------
+    def _set_all(self, on: bool):
+        for t in self._tiles:
+            t.set_checked(on)
+        self._update_selection_count()
+
+    def _apply_range(self):
+        spec = self.range_edit.text().strip()
+        if not spec:
+            return
+        wanted = self._parse_range(spec, self.doc.page_count)
+        if wanted is None:
+            QMessageBox.warning(self, "Invalid range",
+                                "Could not parse that range. Use e.g. 1-5, 8, 12.")
+            return
+        for i, t in enumerate(self._tiles):
+            t.set_checked((i + 1) in wanted)
+        self._update_selection_count()
+
+    @staticmethod
+    def _parse_range(spec: str, page_count: int) -> Optional[set]:
+        result: set = set()
+        try:
+            for part in spec.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    a, b = int(a), int(b)
+                    if a > b:
+                        a, b = b, a
+                    for n in range(a, b + 1):
+                        if 1 <= n <= page_count:
+                            result.add(n)
+                else:
+                    n = int(part)
+                    if 1 <= n <= page_count:
+                        result.add(n)
+        except ValueError:
+            return None
+        return result
+
+    def _selected_indices(self) -> List[int]:
+        return [t.page_index for t in self._tiles if t.is_checked()]
+
+    def _update_selection_count(self):
+        n = len(self._selected_indices())
+        self.sel_count_lbl.setText(f"{n} page{'s' if n != 1 else ''} selected")
+
+    # ------------------------------------------------------------------
+    def _page_text(self, page_index: int) -> str:
+        """Best text for a page: viewer's word cache (native + OCR) joined,
+        falling back to raw get_text."""
+        words = self.viewer.get_page_words(page_index)
+        if words:
+            return " ".join(w.text for w in words)
+        try:
+            return self.doc.load_page(page_index).get_text("text")
+        except Exception:
+            return ""
+
+    def _generate(self):
+        if not edge_tts_available():
+            QMessageBox.critical(
+                self, "edge-tts not installed",
+                "This feature uses Microsoft neural voices via the 'edge-tts' "
+                "package, which isn't installed.\n\nInstall it with:\n"
+                "    pip install edge-tts\n\nThen reopen this dialog."
+            )
+            return
+        pages = self._selected_indices()
+        if not pages:
+            QMessageBox.information(self, APP_NAME, "Select at least one page.")
+            return
+
+        # Gather text; warn if selection has no extractable text at all.
+        # For many pages, extract native text in parallel across CPU cores;
+        # fall back to the viewer's per-page word/OCR cache for anything the
+        # parallel native-text pass couldn't read (e.g. scanned pages).
+        chunks: List[str] = []
+        any_text = False
+        par_text: Dict[int, str] = {}
+        if len(pages) > 8 and self.viewer.doc_path:
+            def _native(page, idx):
+                try:
+                    return page.get_text("text")
+                except Exception:
+                    return ""
+            par_text = parallel_pages(self.viewer.doc_path, pages, _native)
+        for i in pages:
+            txt = (par_text.get(i) or "").strip()
+            if not txt:
+                txt = self._page_text(i).strip()
+            if txt:
+                any_text = True
+            chunks.append(txt)
+        if not any_text:
+            QMessageBox.warning(
+                self, "No text found",
+                "The selected pages don't have any extractable text.\n\n"
+                "If these are scanned pages, enable 'Auto-OCR Scanned Pages' "
+                "in the Tools menu, let it finish, then try again."
+            )
+            return
+
+        fmt = self.format_combo.currentData()
+        base = "audiobook"
+        if self.viewer.doc_path:
+            base = os.path.splitext(os.path.basename(self.viewer.doc_path))[0]
+        default_name = f"{base}.{fmt}"
+        filt = "MP3 Audio (*.mp3)" if fmt == "mp3" else "WAV Audio (*.wav)"
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Audiobook As", default_name, filt
+        )
+        if not out_path:
+            return
+        if not out_path.lower().endswith("." + fmt):
+            out_path += "." + fmt
+
+        voice = self.voice_combo.currentData()
+        self.settings.setValue("audiobook_voice", voice)
+        rate_pct = self.speed_combo.currentData()
+
+        # Spin up the worker on a background thread.
+        self._thread = QThread(self)
+        self._worker = AudiobookWorker(chunks, voice, rate_pct, out_path)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+
+        self.progress.setLabelText("Starting…")
+        self.progress.setRange(0, len(chunks))
+        self.progress.setValue(0)
+        self.progress.show()
+        self._set_busy(True)
+        self._thread.start()
+
+    def _set_busy(self, busy: bool):
+        self.btn_generate.setEnabled(not busy)
+        self.btn_all.setEnabled(not busy)
+        self.btn_none.setEnabled(not busy)
+        self.btn_range.setEnabled(not busy)
+
+    @pyqtSlot(int, int, str)
+    def _on_progress(self, done: int, total: int, msg: str):
+        self.progress.setRange(0, total)
+        self.progress.setValue(done)
+        self.progress.setLabelText(msg)
+        self.status_lbl.setText(msg)
+
+    @pyqtSlot(str)
+    def _on_finished(self, path: str):
+        self._teardown_thread()
+        self.progress.reset()
+        self._set_busy(False)
+        self.status_lbl.setText(f"Saved: {path}")
+        ret = QMessageBox.information(
+            self, "Audiobook created",
+            f"Your audiobook was saved to:\n{path}",
+            QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+        )
+        if ret == QMessageBox.StandardButton.Open:
+            self._open_in_system(path)
+
+    @pyqtSlot(str)
+    def _on_failed(self, msg: str):
+        self._teardown_thread()
+        self.progress.reset()
+        self._set_busy(False)
+        self.status_lbl.setText("Failed.")
+        if msg.lower() != "cancelled.":
+            QMessageBox.critical(self, "Audiobook generation failed", msg)
+
+    def _cancel_generation(self):
+        if self._worker is not None:
+            self._worker.cancel()
+        self.status_lbl.setText("Cancelling…")
+
+    def _teardown_thread(self):
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(3000)
+            self._thread = None
+        self._worker = None
+
+    @staticmethod
+    def _open_in_system(path: str):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", path])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception:
+            pass
+
+    def reject(self):
+        if self._thread is not None and self._thread.isRunning():
+            if self._worker is not None:
+                self._worker.cancel()
+            self._teardown_thread()
+        super().reject()
+
+
+# ===========================================================================
+# Start Screen  (shown when no PDF tabs are open)
+# ===========================================================================
+
+class StartScreen(QWidget):
+    """Welcome screen shown on cold start.  Displays up to 10 recent files
+    as a vertical list of full-width rows (full filename always visible)."""
+
+    openRequested = pyqtSignal(str)         # emitted when user clicks a recent file
+    openDialogRequested = pyqtSignal()      # emitted when user clicks "Open PDF…"
+    clearRecentRequested = pyqtSignal()     # emitted when user clicks "Clear list"
+    removeRecentRequested = pyqtSignal(str) # emitted when user clicks a row's ✕
+
+    _ROW_H = 56
+    _CONTENT_MAX_W = 720    # max width of the centered content column
+    _TOP_MARGIN    = 60     # space from top of window to title
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("startScreen")
+        self._recent: List[str] = []
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        # Outer:  top-margin | centered-content | bottom-stretch
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(40, self._TOP_MARGIN, 40, 40)
+        outer.setSpacing(0)
+
+        # Horizontal centering row: stretch | content | stretch
+        center_row = QHBoxLayout()
+        center_row.setSpacing(0)
+        center_row.addStretch(1)
+
+        content = QWidget()
+        content.setMaximumWidth(self._CONTENT_MAX_W)
+        content.setMinimumWidth(420)
+        col = QVBoxLayout(content)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        # --- Hero ---------------------------------------------------------
+        title = QLabel(APP_NAME)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setObjectName("startTitle")
+        col.addWidget(title)
+
+        sub = QLabel("A fast, modern PDF reader")
+        sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub.setObjectName("startSubtitle")
+        col.addWidget(sub)
+
+        col.addSpacing(24)
+
+        # --- Open button --------------------------------------------------
+        btn_open = QPushButton("Open PDF…")
+        btn_open.setObjectName("startOpenBtn")
+        btn_open.setFixedSize(180, 42)
+        btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_open.clicked.connect(self.openDialogRequested)
+
+        btn_row = QHBoxLayout()
+        btn_row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        btn_row.addWidget(btn_open)
+        col.addLayout(btn_row)
+
+        col.addSpacing(36)
+
+        # --- Recent files header (with "Clear" link on the right) --------
+        self._recent_header = QWidget()
+        hdr = QHBoxLayout(self._recent_header)
+        hdr.setContentsMargins(0, 0, 0, 6)
+        hdr.setSpacing(12)
+
+        self._recent_label = QLabel("Recent Files")
+        self._recent_label.setObjectName("startSection")
+        hdr.addWidget(self._recent_label)
+        hdr.addStretch(1)
+
+        self._btn_clear = QPushButton("Clear list")
+        self._btn_clear.setObjectName("startClearBtn")
+        self._btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_clear.setFlat(True)
+        self._btn_clear.clicked.connect(self.clearRecentRequested)
+        hdr.addWidget(self._btn_clear)
+
+        col.addWidget(self._recent_header)
+
+        # --- Vertical list of rows ---------------------------------------
+        self._list_widget = QWidget()
+        self._list = QVBoxLayout(self._list_widget)
+        self._list.setSpacing(6)
+        self._list.setContentsMargins(0, 0, 0, 0)
+        col.addWidget(self._list_widget)
+
+        center_row.addWidget(content)
+        center_row.addStretch(1)
+
+        outer.addLayout(center_row)
+        outer.addStretch(1)
+
+    # ------------------------------------------------------------------
+    def refresh(self, recent_files: List[str]):
+        """Rebuild the recent-files list from the supplied list (max 10)."""
+        self._recent = recent_files[:MAX_RECENT]
+
+        # Clear old rows
+        while self._list.count():
+            item = self._list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self._recent:
+            self._recent_header.hide()
+            self._list_widget.hide()
+            return
+
+        self._recent_header.show()
+        self._list_widget.show()
+
+        for path in self._recent:
+            self._list.addWidget(self._make_row(path))
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _human_size(num_bytes: float) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if num_bytes < 1024 or unit == "GB":
+                return f"{int(num_bytes)} {unit}" if unit == "B" else f"{num_bytes:.1f} {unit}"
+            num_bytes /= 1024
+        return f"{num_bytes:.1f} GB"
+
+    @staticmethod
+    def _relative_time(ts: float) -> str:
+        import time
+        delta = time.time() - ts
+        if delta < 60:               return "just now"
+        if delta < 3600:             return f"{int(delta // 60)} min ago"
+        if delta < 86400:            return f"{int(delta // 3600)} hr ago"
+        if delta < 86400 * 7:        return f"{int(delta // 86400)} days ago"
+        if delta < 86400 * 30:       return f"{int(delta // (86400 * 7))} wk ago"
+        if delta < 86400 * 365:      return f"{int(delta // (86400 * 30))} mo ago"
+        return f"{int(delta // (86400 * 365))} yr ago"
+
+    # ------------------------------------------------------------------
+    def _make_row(self, path: str) -> QPushButton:
+        """Build a full-width row showing the complete filename + folder/meta."""
+        name = os.path.basename(path) or path
+        folder = os.path.dirname(path) or ""
+        # Show parent + grandparent for context (e.g. "Documents\Books")
+        if folder and len(folder) > 50:
+            folder = "…" + folder[-49:]
+
+        exists = os.path.isfile(path)
+        if exists:
+            try:
+                st = os.stat(path)
+                meta = f"{self._human_size(st.st_size)}  ·  {self._relative_time(st.st_mtime)}"
+            except OSError:
+                meta = ""
+        else:
+            meta = "(file not found)"
+
+        btn = QPushButton()
+        btn.setObjectName("recentRow")
+        btn.setProperty("missing", "true" if not exists else "false")
+        btn.style().unpolish(btn)
+        btn.style().polish(btn)
+        btn.setMinimumHeight(self._ROW_H)
+        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(path)
+        btn.clicked.connect(lambda _=False, p=path: self.openRequested.emit(p))
+
+        # Row content: [icon] | filename (full)         folder · meta
+        h = QHBoxLayout(btn)
+        h.setContentsMargins(14, 8, 14, 8)
+        h.setSpacing(14)
+
+        icon = QLabel("\U0001F4C4")   # 📄
+        icon.setObjectName("recentRowIcon")
+        icon.setFixedWidth(24)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.addWidget(icon)
+
+        # Left column: filename (full, no elide) + folder
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(2)
+
+        lbl_name = QLabel(name)
+        lbl_name.setObjectName("recentRowName")
+        left.addWidget(lbl_name)
+
+        if folder:
+            lbl_folder = QLabel(folder)
+            lbl_folder.setObjectName("recentRowFolder")
+            left.addWidget(lbl_folder)
+
+        h.addLayout(left, 1)
+
+        # Right column: file size · relative time
+        lbl_meta = QLabel(meta)
+        lbl_meta.setObjectName("recentRowMeta")
+        lbl_meta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(lbl_meta, 0)
+
+        # Remove-from-recents "X" button on the far right.
+        btn_remove = QPushButton("\u2715")   # ✕
+        btn_remove.setObjectName("recentRowRemove")
+        btn_remove.setFixedSize(24, 24)
+        btn_remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_remove.setToolTip("Remove from Recent Files")
+        # Don't let the click fall through to the row's open handler.
+        btn_remove.clicked.connect(
+            lambda _=False, p=path: self.removeRecentRequested.emit(p)
+        )
+        h.addWidget(btn_remove, 0)
+
+        return btn
+
+
+# ===========================================================================
+# Tab Manager  (QTabWidget wrapping multiple PdfViewer instances)
+# ===========================================================================
+
+class TabManager(QTabWidget):
+    """A QTabWidget where each tab is one PdfViewer.
+
+    Signals forwarded to MainWindow come from the *active* viewer only.
+    """
+
+    # Re-emit signals from whichever tab is currently active
+    pageChanged    = pyqtSignal(int)
+    zoomChanged    = pyqtSignal(float)
+    statusMessage  = pyqtSignal(str)
+    documentLoaded = pyqtSignal()
+    documentClosed = pyqtSignal()
+    thumbnailReady = pyqtSignal(int, QImage)
+    # Notify when active viewer switches (MainWindow must resync docks etc.)
+    activeViewerChanged = pyqtSignal()
+    # User clicked the "+" tab corner button -> show start menu
+    newTabRequested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("docTabs")  # used by QSS to scope tab styles to *document* tabs only
+        self.setTabsClosable(True)
+        self.setMovable(True)
+        self.setDocumentMode(True)
+        self.tabCloseRequested.connect(self._close_tab)
+        self.currentChanged.connect(self._on_current_changed)
+
+        # "+" button on the right side of the tab bar.
+        # Clicking it returns to the start menu so the user can pick a recent file.
+        self._btn_new = QPushButton("+")
+        self._btn_new.setObjectName("tabNewBtn")
+        self._btn_new.setFixedSize(28, 24)
+        self._btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_new.setToolTip("New tab — open the start menu (Ctrl+T)")
+        self._btn_new.setFlat(True)
+        self._btn_new.clicked.connect(self.newTabRequested)
+        self.setCornerWidget(self._btn_new, Qt.Corner.TopRightCorner)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    @property
+    def viewer(self) -> Optional[PdfViewer]:
+        """The currently active PdfViewer, or None."""
+        w = self.currentWidget()
+        return w if isinstance(w, PdfViewer) else None
+
+    def open_new_tab(self) -> PdfViewer:
+        """Create a blank PdfViewer tab, make it active, and return it."""
+        v = PdfViewer(self)
+        self._connect_viewer(v)
+        idx = self.addTab(v, "New Tab")
+        self.setCurrentIndex(idx)
+        return v
+
+    def find_tab_for_path(self, path: str) -> int:
+        """Return tab index whose viewer has *path* open, or -1."""
+        norm = os.path.normcase(os.path.abspath(path))
+        for i in range(self.count()):
+            w = self.widget(i)
+            if isinstance(w, PdfViewer) and w.doc_path:
+                if os.path.normcase(os.path.abspath(w.doc_path)) == norm:
+                    return i
+        return -1
+
+    def set_tab_title(self, viewer: PdfViewer, title: str):
+        idx = self.indexOf(viewer)
+        if idx >= 0:
+            # Truncate long names for the tab label
+            short = title if len(title) <= 30 else title[:28] + "…"
+            self.setTabText(idx, short)
+            self.setTabToolTip(idx, title)
+
+    def shutdown_all(self):
+        for i in range(self.count()):
+            w = self.widget(i)
+            if isinstance(w, PdfViewer):
+                w.shutdown()
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+    def _connect_viewer(self, v: PdfViewer):
+        v.pageChanged.connect(   lambda val, _v=v: self._fwd(self.pageChanged,    val, _v))
+        v.zoomChanged.connect(   lambda val, _v=v: self._fwd(self.zoomChanged,    val, _v))
+        v.statusMessage.connect( lambda val, _v=v: self._fwd(self.statusMessage,  val, _v))
+        v.documentLoaded.connect(lambda      _v=v: self._fwd_noarg(self.documentLoaded, _v))
+        v.documentClosed.connect(lambda      _v=v: self._fwd_noarg(self.documentClosed, _v))
+        v.thumbnailReady.connect(lambda pi, img, _v=v: self._fwd2(self.thumbnailReady, pi, img, _v))
+
+    def _fwd(self, signal, val, sender: PdfViewer):
+        if self.viewer is sender:
+            signal.emit(val)
+
+    def _fwd_noarg(self, signal, sender: PdfViewer):
+        if self.viewer is sender:
+            signal.emit()
+
+    def _fwd2(self, signal, a, b, sender: PdfViewer):
+        if self.viewer is sender:
+            signal.emit(a, b)
+
+    def _close_tab(self, index: int):
+        w = self.widget(index)
+        if isinstance(w, PdfViewer):
+            w.shutdown()
+        self.removeTab(index)
+        self.activeViewerChanged.emit()
+
+    def _on_current_changed(self, _index: int):
+        self.activeViewerChanged.emit()
+
+
+# ===========================================================================
 # Main Window
 # ===========================================================================
 
@@ -1688,14 +4017,32 @@ class MainWindow(QMainWindow):
         self.resize(1320, 880)
         self.setAcceptDrops(True)
 
-        self.viewer = PdfViewer(self)
-        self.setCentralWidget(self.viewer)
-        self.viewer.pageChanged.connect(self._on_page_changed)
-        self.viewer.zoomChanged.connect(self._on_zoom_changed)
-        self.viewer.statusMessage.connect(self._set_status)
-        self.viewer.documentLoaded.connect(self._on_document_loaded)
-        self.viewer.documentClosed.connect(self._on_document_closed)
-        self.viewer.thumbnailReady.connect(self._on_thumbnail_ready)
+        # --- Central area: QStackedWidget holds start screen (index 0)
+        #     and tab manager (index 1) ---
+        self._stack = QStackedWidget(self)
+        self.setCentralWidget(self._stack)
+
+        # Start screen
+        self._start_screen = StartScreen(self)
+        self._start_screen.openRequested.connect(self._open_path)
+        self._start_screen.openDialogRequested.connect(self.action_open)
+        self._start_screen.clearRecentRequested.connect(self._clear_recent_from_start)
+        self._start_screen.removeRecentRequested.connect(self._remove_from_recent)
+        self._stack.addWidget(self._start_screen)   # index 0
+
+        # Tab manager
+        self.tabs = TabManager(self)
+        self._stack.addWidget(self.tabs)             # index 1
+
+        # Wire TabManager signals (same names as old single-viewer wiring)
+        self.tabs.pageChanged.connect(self._on_page_changed)
+        self.tabs.zoomChanged.connect(self._on_zoom_changed)
+        self.tabs.statusMessage.connect(self._set_status)
+        self.tabs.documentLoaded.connect(self._on_document_loaded)
+        self.tabs.documentClosed.connect(self._on_document_closed)
+        self.tabs.thumbnailReady.connect(self._on_thumbnail_ready)
+        self.tabs.activeViewerChanged.connect(self._on_active_viewer_changed)
+        self.tabs.newTabRequested.connect(self._show_start_screen)
 
         self._build_docks()
         self._build_menus()
@@ -1714,12 +4061,50 @@ class MainWindow(QMainWindow):
         if state:
             self.restoreState(state)
 
+        # Show start screen on cold start (no CLI arg yet)
+        self._show_start_screen()
+
+    # ------------------------------------------------------------------
+    # Stack helpers
+    # ------------------------------------------------------------------
+    def _show_start_screen(self):
+        self._start_screen.refresh(self._recent_files())
+        self._stack.setCurrentIndex(0)
+        # Hide side panels + toolbar on the welcome screen
+        self._set_chrome_visible(False)
+
+    def _show_tabs(self):
+        self._stack.setCurrentIndex(1)
+        self._set_chrome_visible(True)
+
+    def _set_chrome_visible(self, visible: bool):
+        """Show / hide the docks and toolbar.  Used to keep the start screen clean."""
+        for dock in (
+            getattr(self, "thumb_dock", None),
+            getattr(self, "outline_dock", None),
+            getattr(self, "bookmarks_dock", None),
+        ):
+            if dock is not None:
+                dock.setVisible(visible)
+        # Toolbar is the QToolBar we added in _build_toolbar; find it by name.
+        for tb in self.findChildren(QToolBar):
+            tb.setVisible(visible)
+
+    @property
+    def viewer(self) -> Optional[PdfViewer]:
+        """Convenience: active PdfViewer or None."""
+        return self.tabs.viewer
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
     def _build_docks(self):
         self.thumb_panel = ThumbnailPanel()
-        self.thumb_panel.pageRequested.connect(self.viewer.goto_page)
+        self.thumb_panel.pageRequested.connect(lambda p: self.viewer and self.viewer.goto_page(p))
+        # Render thumbnails on-demand for currently-visible rows only.
+        self.thumb_panel.visiblePagesChanged.connect(
+            lambda pages: self.viewer and self.viewer.request_thumbnails_for(pages)
+        )
         self.thumb_dock = QDockWidget("Thumbnails", self)
         self.thumb_dock.setWidget(self.thumb_panel)
         self.thumb_dock.setAllowedAreas(
@@ -1728,7 +4113,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.thumb_dock)
 
         self.outline_panel = OutlinePanel()
-        self.outline_panel.pageRequested.connect(self.viewer.goto_page)
+        self.outline_panel.pageRequested.connect(lambda p: self.viewer and self.viewer.goto_page(p))
         self.outline_dock = QDockWidget("Outline", self)
         self.outline_dock.setWidget(self.outline_panel)
         self.outline_dock.setAllowedAreas(
@@ -1738,7 +4123,7 @@ class MainWindow(QMainWindow):
 
         self.bookmarks_panel = BookmarksPanel()
         self.bookmarks_panel.btn_add.clicked.connect(self._add_bookmark)
-        self.bookmarks_panel.pageRequested.connect(self.viewer.goto_page)
+        self.bookmarks_panel.pageRequested.connect(lambda p: self.viewer and self.viewer.goto_page(p))
         self.bookmarks_panel.bookmarksChanged.connect(self._save_bookmarks)
         self.bookmarks_dock = QDockWidget("Bookmarks", self)
         self.bookmarks_dock.setWidget(self.bookmarks_panel)
@@ -1770,20 +4155,20 @@ class MainWindow(QMainWindow):
 
         # Edit ------------------------------------------------------------
         m_edit = mb.addMenu("&Edit")
-        m_edit.addAction(self._mk("&Copy", self.viewer.copy_selection, QKeySequence.StandardKey.Copy))
-        m_edit.addAction(self._mk("Copy Whole Page Text", self.viewer.select_all_visible_text, "Ctrl+Shift+C"))
+        m_edit.addAction(self._mk("&Copy", lambda: self.viewer and self.viewer.copy_selection(), QKeySequence.StandardKey.Copy))
+        m_edit.addAction(self._mk("Copy Whole Page Text", lambda: self.viewer and self.viewer.select_all_visible_text(), "Ctrl+Shift+C"))
         m_edit.addAction(self._mk("&Find...", self._focus_search, QKeySequence.StandardKey.Find))
 
         # View ------------------------------------------------------------
         m_view = mb.addMenu("&View")
-        m_view.addAction(self._mk("Zoom &In", self.viewer.zoom_in, "Ctrl++"))
-        m_view.addAction(self._mk("Zoom &Out", self.viewer.zoom_out, "Ctrl+-"))
-        m_view.addAction(self._mk("Fit &Width", self.viewer.fit_width, "Ctrl+1"))
-        m_view.addAction(self._mk("Fit &Page", self.viewer.fit_page, "Ctrl+2"))
-        m_view.addAction(self._mk("Actual &Size (100%)", lambda: self.viewer.set_zoom(1.0, None), "Ctrl+0"))
+        m_view.addAction(self._mk("Zoom &In",  lambda: self.viewer and self.viewer.zoom_in(),  "Ctrl++"))
+        m_view.addAction(self._mk("Zoom &Out", lambda: self.viewer and self.viewer.zoom_out(), "Ctrl+-"))
+        m_view.addAction(self._mk("Fit &Width", lambda: self.viewer and self.viewer.fit_width(), "Ctrl+1"))
+        m_view.addAction(self._mk("Fit &Page",  lambda: self.viewer and self.viewer.fit_page(),  "Ctrl+2"))
+        m_view.addAction(self._mk("Actual &Size (100%)", lambda: self.viewer and self.viewer.set_zoom(1.0, None), "Ctrl+0"))
         m_view.addSeparator()
-        m_view.addAction(self._mk("Rotate &Left", lambda: self.viewer.rotate(-90), "Ctrl+L"))
-        m_view.addAction(self._mk("Rotate &Right", lambda: self.viewer.rotate(90), "Ctrl+R"))
+        m_view.addAction(self._mk("Rotate &Left",  lambda: self.viewer and self.viewer.rotate(-90), "Ctrl+L"))
+        m_view.addAction(self._mk("Rotate &Right", lambda: self.viewer and self.viewer.rotate(90),  "Ctrl+R"))
         m_view.addSeparator()
 
         # Color modes
@@ -1797,9 +4182,9 @@ class MainWindow(QMainWindow):
 
         # View modes
         m_layout = m_view.addMenu("Page &Layout")
-        self.act_continuous = self._mk("&Continuous", lambda: self.viewer.set_view_mode(PdfViewer.VIEW_CONTINUOUS), checkable=True)
-        self.act_single = self._mk("&Single Page", lambda: self.viewer.set_view_mode(PdfViewer.VIEW_SINGLE), checkable=True)
-        self.act_two = self._mk("&Two Page (Book)", lambda: self.viewer.set_view_mode(PdfViewer.VIEW_TWO), checkable=True)
+        self.act_continuous = self._mk("&Continuous",    lambda: self.viewer and self.viewer.set_view_mode(PdfViewer.VIEW_CONTINUOUS), checkable=True)
+        self.act_single     = self._mk("&Single Page",   lambda: self.viewer and self.viewer.set_view_mode(PdfViewer.VIEW_SINGLE),     checkable=True)
+        self.act_two        = self._mk("&Two Page (Book)", lambda: self.viewer and self.viewer.set_view_mode(PdfViewer.VIEW_TWO),      checkable=True)
         self.act_continuous.setChecked(True)
         m_layout.addAction(self.act_continuous)
         m_layout.addAction(self.act_single)
@@ -1817,7 +4202,7 @@ class MainWindow(QMainWindow):
 
         # Navigate --------------------------------------------------------
         m_nav = mb.addMenu("&Navigate")
-        m_nav.addAction(self._mk("&First Page", lambda: self.viewer.goto_page(0), "Ctrl+Home"))
+        m_nav.addAction(self._mk("&First Page", lambda: self.viewer and self.viewer.goto_page(0), "Ctrl+Home"))
         m_nav.addAction(self._mk("&Previous Page", self._prev_page, "PgUp"))
         m_nav.addAction(self._mk("&Next Page", self._next_page, "PgDown"))
         m_nav.addAction(self._mk("&Last Page", self._last_page, "Ctrl+End"))
@@ -1836,6 +4221,26 @@ class MainWindow(QMainWindow):
         m_tools.addAction(self._mk("OCR &Whole Document...", self.action_ocr_document))
         m_tools.addSeparator()
         m_tools.addAction(self._mk("OCR &Language...", self.action_set_ocr_language))
+        # Auto-OCR toggle
+        self.act_auto_ocr = self._mk(
+            "Auto-OCR &Scanned Pages on Open",
+            self._toggle_auto_ocr,
+            checkable=True,
+        )
+        # Set the initial checked state WITHOUT firing the toggled handler:
+        # _toggle_auto_ocr() touches self.status, which _build_statusbar()
+        # has not created yet at this point in construction.
+        self.act_auto_ocr.blockSignals(True)
+        self.act_auto_ocr.setChecked(
+            self.settings.value("auto_ocr_enabled", True, type=bool)
+        )
+        self.act_auto_ocr.blockSignals(False)
+        m_tools.addAction(self.act_auto_ocr)
+        m_tools.addSeparator()
+        m_tools.addAction(self._mk("&Read Aloud / Pause", self.action_tts_play_pause, "Ctrl+Space"))
+        m_tools.addAction(self._mk("Stop Reading", self.action_tts_stop))
+        m_tools.addSeparator()
+        m_tools.addAction(self._mk("Create &Audiobook from Pages...", self.action_create_audiobook, "Ctrl+Shift+B"))
 
         # Help ------------------------------------------------------------
         m_help = mb.addMenu("&Help")
@@ -1860,6 +4265,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
         tb.addWidget(self._tb_btn("Open", self.action_open))
+        tb.addWidget(self._tb_btn("+ Tab", self._new_tab, tip="Open a new tab (Ctrl+T)"))
         tb.addSeparator()
         tb.addWidget(self._tb_btn("◀", self._prev_page, tip="Previous page (PgUp)"))
 
@@ -1872,7 +4278,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_total_lbl)
         tb.addWidget(self._tb_btn("▶", self._next_page, tip="Next page (PgDown)"))
         tb.addSeparator()
-        tb.addWidget(self._tb_btn("−", self.viewer.zoom_out, tip="Zoom Out"))
+        tb.addWidget(self._tb_btn("−", lambda: self.viewer and self.viewer.zoom_out(), tip="Zoom Out"))
 
         self.zoom_combo = QComboBox()
         self.zoom_combo.setEditable(True)
@@ -1883,11 +4289,11 @@ class MainWindow(QMainWindow):
         self.zoom_combo.activated.connect(lambda *_: self._on_zoom_combo_text())
         self.zoom_combo.lineEdit().returnPressed.connect(self._on_zoom_combo_text)
         tb.addWidget(self.zoom_combo)
-        tb.addWidget(self._tb_btn("+", self.viewer.zoom_in, tip="Zoom In"))
+        tb.addWidget(self._tb_btn("+", lambda: self.viewer and self.viewer.zoom_in(), tip="Zoom In"))
 
         tb.addSeparator()
-        tb.addWidget(self._tb_btn("⟲", lambda: self.viewer.rotate(-90), tip="Rotate Left"))
-        tb.addWidget(self._tb_btn("⟳", lambda: self.viewer.rotate(90), tip="Rotate Right"))
+        tb.addWidget(self._tb_btn("⟲", lambda: self.viewer and self.viewer.rotate(-90), tip="Rotate Left"))
+        tb.addWidget(self._tb_btn("⟳", lambda: self.viewer and self.viewer.rotate(90), tip="Rotate Right"))
         tb.addSeparator()
 
         # View mode quick switch
@@ -1902,14 +4308,41 @@ class MainWindow(QMainWindow):
         self.search_input.setFixedWidth(220)
         self.search_input.returnPressed.connect(self._do_search)
         tb.addWidget(self.search_input)
-        tb.addWidget(self._tb_btn("↑", self.viewer.prev_hit, tip="Previous match (Shift+F3)"))
-        tb.addWidget(self._tb_btn("↓", self.viewer.next_hit, tip="Next match (F3)"))
+        tb.addWidget(self._tb_btn("↑", lambda: self.viewer and self.viewer.prev_hit(), tip="Previous match (Shift+F3)"))
+        tb.addWidget(self._tb_btn("↓", lambda: self.viewer and self.viewer.next_hit(), tip="Next match (F3)"))
         self.search_count_lbl = QLabel("")
         tb.addWidget(self.search_count_lbl)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
+
+        # Read aloud (TTS) controls
+        self.btn_tts_play = self._tb_btn(
+            "▶ Read", self.action_tts_play_pause,
+            tip="Read aloud / Pause (Ctrl+Space)",
+        )
+        tb.addWidget(self.btn_tts_play)
+        self.btn_tts_stop = self._tb_btn(
+            "■", self.action_tts_stop, tip="Stop reading (Esc)",
+        )
+        tb.addWidget(self.btn_tts_stop)
+        # Voice / rate menu
+        self.btn_tts_settings = QPushButton("⚙")
+        self.btn_tts_settings.setToolTip("Read-aloud settings: voice & speed")
+        self._tts_menu = QMenu(self)
+        self.btn_tts_settings.setMenu(self._tts_menu)
+        # Build the menu lazily on first click so we don't init pyttsx3 unless needed.
+        self._tts_menu.aboutToShow.connect(self._build_tts_menu)
+        self._fit_button_width(self.btn_tts_settings)
+        tb.addWidget(self.btn_tts_settings)
+        # Audiobook export (natural neural voice via edge-tts)
+        self.btn_audiobook = self._tb_btn(
+            "🎧 Audiobook", self.action_create_audiobook,
+            tip="Create an audiobook from selected pages (Ctrl+Shift+B)",
+        )
+        tb.addWidget(self.btn_audiobook)
+        tb.addSeparator()
 
         # OCR button
         self.btn_ocr = QPushButton("OCR")
@@ -1921,6 +4354,7 @@ class MainWindow(QMainWindow):
         ocr_menu.addSeparator()
         ocr_menu.addAction("Set OCR Language...", self.action_set_ocr_language)
         self.btn_ocr.setMenu(ocr_menu)
+        self._fit_button_width(self.btn_ocr)
         tb.addWidget(self.btn_ocr)
 
         # Color mode toggle
@@ -1929,32 +4363,129 @@ class MainWindow(QMainWindow):
         self.btn_dark.setChecked(self.color_mode == "dark")
         self.btn_dark.setToolTip("Toggle Dark Mode (Ctrl+D)")
         self.btn_dark.clicked.connect(lambda checked: self._apply_color_mode("dark" if checked else "light"))
+        self._fit_button_width(self.btn_dark)
         tb.addWidget(self.btn_dark)
+
+    @staticmethod
+    def _fit_button_width(b: QPushButton, extra: int = 0):
+        """Ensure a button is at least wide enough for its text (+ optional
+        menu arrow) so the label never clips, and stop the toolbar from
+        squeezing it narrower than that. Uses font metrics so it scales with
+        the active font / display DPI."""
+        fm = b.fontMetrics()
+        # boundingRect handles wide glyphs/emoji better than horizontalAdvance.
+        text_w = fm.boundingRect(b.text()).width()
+        # QSS padding is 6px 12px (=24px) + 2px border + safety margin.
+        pad = 34 + extra
+        if b.menu() is not None:
+            pad += 20  # dropdown arrow needs room
+        need = text_w + pad
+        b.setMinimumWidth(need)
+        # Prevent the toolbar layout from shrinking the button below its text;
+        # excess items go to the toolbar's ">>" overflow menu instead of
+        # clipping the label.
+        pol = b.sizePolicy()
+        pol.setHorizontalPolicy(QSizePolicy.Policy.Minimum)
+        b.setSizePolicy(pol)
 
     def _tb_btn(self, text: str, slot, tip: str = "") -> QPushButton:
         b = QPushButton(text)
         if tip:
             b.setToolTip(tip)
         b.clicked.connect(slot)
+        self._fit_button_width(b)
         return b
 
     def _build_statusbar(self):
         self.status: QStatusBar = self.statusBar()
         self.page_status_lbl = QLabel(" - / - ")
         self.zoom_status_lbl = QLabel("100%")
+
+        # Auto-OCR progress widgets - hidden until a scan starts.
+        self.ocr_progress_lbl = QLabel("")
+        self.ocr_progress_lbl.setStyleSheet("color: #6b7280;")
+        self.ocr_cancel_btn = QPushButton("Cancel")
+        self.ocr_cancel_btn.setFlat(True)
+        self.ocr_cancel_btn.setStyleSheet(
+            "QPushButton { color: #2563eb; background: transparent; border: none; padding: 0 6px; }"
+            "QPushButton:hover { text-decoration: underline; }"
+        )
+        self.ocr_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ocr_cancel_btn.clicked.connect(self._cancel_auto_ocr)
+        self.ocr_progress_lbl.setVisible(False)
+        self.ocr_cancel_btn.setVisible(False)
+
+        self.status.addPermanentWidget(self.ocr_progress_lbl)
+        self.status.addPermanentWidget(self.ocr_cancel_btn)
         self.status.addPermanentWidget(self.page_status_lbl)
         self.status.addPermanentWidget(self.zoom_status_lbl)
         self.status.showMessage("Ready. Open a PDF to begin.")
 
     def _build_shortcuts(self):
-        QShortcut(QKeySequence("F3"), self, activated=self.viewer.next_hit)
-        QShortcut(QKeySequence("Shift+F3"), self, activated=self.viewer.prev_hit)
-        QShortcut(QKeySequence("Esc"), self, activated=self._on_escape)
+        QShortcut(QKeySequence("F3"),         self, activated=lambda: self.viewer and self.viewer.next_hit())
+        QShortcut(QKeySequence("Shift+F3"),   self, activated=lambda: self.viewer and self.viewer.prev_hit())
+        QShortcut(QKeySequence("Esc"),        self, activated=self._on_escape)
+        QShortcut(QKeySequence("Ctrl+T"),     self, activated=self._new_tab)
+        QShortcut(QKeySequence("Ctrl+Space"), self, activated=self.action_tts_play_pause)
         # Arrow keys for navigation in single-page mode + scrolling
-        QShortcut(QKeySequence("Right"), self, activated=self._next_page)
-        QShortcut(QKeySequence("Left"), self, activated=self._prev_page)
-        QShortcut(QKeySequence("Space"), self, activated=self._page_down_scroll)
-        QShortcut(QKeySequence("Shift+Space"), self, activated=self._page_up_scroll)
+        QShortcut(QKeySequence("Right"),      self, activated=self._next_page)
+        QShortcut(QKeySequence("Left"),       self, activated=self._prev_page)
+        QShortcut(QKeySequence("Space"),      self, activated=self._page_down_scroll)
+        QShortcut(QKeySequence("Shift+Space"),self, activated=self._page_up_scroll)
+
+    # ------------------------------------------------------------------
+    # Tab helpers
+    # ------------------------------------------------------------------
+    def _new_tab(self):
+        """Open a file-picker dialog and load the chosen PDF into a new tab."""
+        last_dir = self.settings.value("last_dir", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open PDF in New Tab", last_dir, "PDF Files (*.pdf);;All Files (*)"
+        )
+        if path:
+            self._open_path(path)
+
+    def _on_active_viewer_changed(self):
+        """Called when the user switches tabs or a tab is closed/opened."""
+        v = self.viewer
+        if v is None:
+            # No tabs left — go back to start screen
+            if self.tabs.count() == 0:
+                self._show_start_screen()
+            self._sync_toolbar_to_viewer(None)
+            self._on_tts_state_changed(ReadAloudController.STATE_IDLE)
+            return
+        self._show_tabs()
+        # Re-sync toolbar / docks to the newly active viewer
+        if v.doc:
+            self._on_document_loaded()
+        else:
+            self._on_document_closed()
+        self._sync_toolbar_to_viewer(v)
+        # Reflect the active tab's TTS state in the toolbar.
+        if hasattr(v, "_tts") and v._tts is not None:
+            self._on_tts_state_changed(v._tts.state)
+        else:
+            self._on_tts_state_changed(ReadAloudController.STATE_IDLE)
+
+    def _sync_toolbar_to_viewer(self, v: Optional[PdfViewer]):
+        """Update zoom combo and page counter to reflect the active viewer."""
+        if v is None or v.doc is None:
+            self.zoom_combo.lineEdit().setText("100%")
+            self.zoom_status_lbl.setText("100%")
+            self.page_input.setText("")
+            self.page_total_lbl.setText(" / 0 ")
+            self.search_count_lbl.setText("")
+            return
+        # Zoom
+        pct = f"{int(v.zoom * 100)}%"
+        self.zoom_combo.lineEdit().setText(pct)
+        self.zoom_status_lbl.setText(pct)
+        # Page
+        idx = v.current_page_index()
+        self.page_input.setText(str(idx + 1))
+        self.page_total_lbl.setText(f" / {v.doc.page_count} ")
+        self.page_status_lbl.setText(f" {idx + 1} / {v.doc.page_count} ")
 
     # ------------------------------------------------------------------
     # File actions
@@ -1971,20 +4502,52 @@ class MainWindow(QMainWindow):
         if not os.path.isfile(path):
             QMessageBox.warning(self, APP_NAME, f"File not found:\n{path}")
             return
-        # Save state of current doc first
+
+        # If this file is already open in a tab, just switch to it
+        existing = self.tabs.find_tab_for_path(path)
+        if existing >= 0:
+            self.tabs.setCurrentIndex(existing)
+            self._show_tabs()
+            return
+
+        # Save state of current tab's doc before opening a new one
         self._save_session_state()
-        if self.viewer.open_pdf(path):
+
+        # Always open in a fresh tab.
+        # Inherit the app's current color mode so the first render uses dark/sepia
+        # immediately - otherwise the new viewer defaults to "light" until the
+        # user toggles the mode.
+        v = self.tabs.open_new_tab()
+        v.set_color_mode(self.color_mode)
+        if v.open_pdf(path):
             self.settings.setValue("last_dir", os.path.dirname(path))
             self._add_to_recent(path)
+            self._show_tabs()
+        else:
+            # open failed — remove the blank tab we just created
+            idx = self.tabs.indexOf(v)
+            if idx >= 0:
+                self.tabs._close_tab(idx)
+            if self.tabs.count() == 0:
+                self._show_start_screen()
 
     def action_close_pdf(self):
+        """Close the active tab (or its PDF if it has one)."""
+        v = self.viewer
+        if v is None:
+            return
         self._save_session_state()
-        self.viewer.close_pdf()
+        idx = self.tabs.indexOf(v)
+        if idx >= 0:
+            self.tabs._close_tab(idx)
+        if self.tabs.count() == 0:
+            self._show_start_screen()
 
     def action_save_copy(self):
-        if self.viewer.doc is None or self.viewer.doc_path is None:
+        v = self.viewer
+        if v is None or v.doc is None or v.doc_path is None:
             return
-        suggested = os.path.splitext(os.path.basename(self.viewer.doc_path))[0] + "_copy.pdf"
+        suggested = os.path.splitext(os.path.basename(v.doc_path))[0] + "_copy.pdf"
         last_dir = self.settings.value("last_dir", "")
         path, _ = QFileDialog.getSaveFileName(
             self, "Save a Copy", os.path.join(last_dir, suggested), "PDF Files (*.pdf)"
@@ -1992,25 +4555,35 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self.viewer.doc.save(path, garbage=4, deflate=True, clean=True)
+            v.doc.save(path, garbage=4, deflate=True, clean=True)
             self._set_status(f"Saved copy: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
 
     def action_extract_text(self):
-        if self.viewer.doc is None:
+        v = self.viewer
+        if v is None or v.doc is None:
             return
-        suggested = os.path.splitext(os.path.basename(self.viewer.doc_path or "document.pdf"))[0] + ".txt"
+        suggested = os.path.splitext(os.path.basename(v.doc_path or "document.pdf"))[0] + ".txt"
         path, _ = QFileDialog.getSaveFileName(
             self, "Extract Text", suggested, "Text Files (*.txt)"
         )
         if not path:
             return
+        n = v.doc.page_count
         try:
+            if n <= 8 or not v.doc_path:
+                # Small doc: sequential is fine and avoids thread overhead.
+                pages_text = {i: v.doc.load_page(i).get_text("text") for i in range(n)}
+            else:
+                # Large doc: extract text across CPU cores in parallel.
+                def _extract(page, idx):
+                    return page.get_text("text")
+                pages_text = parallel_pages(v.doc_path, range(n), _extract)
             with open(path, "w", encoding="utf-8") as f:
-                for i in range(self.viewer.doc.page_count):
+                for i in range(n):
                     f.write(f"--- Page {i + 1} ---\n")
-                    f.write(self.viewer.doc.load_page(i).get_text("text"))
+                    f.write(pages_text.get(i, ""))
                     f.write("\n")
             self._set_status(f"Text extracted to {path}")
         except Exception as e:
@@ -2026,10 +4599,11 @@ class MainWindow(QMainWindow):
         return ok
 
     def action_ocr_current_page(self):
-        if self.viewer.doc is None or not self._check_tesseract():
+        v = self.viewer
+        if v is None or v.doc is None or not self._check_tesseract():
             return
-        idx = self.viewer.current_page_index()
-        page = self.viewer.doc.load_page(idx)
+        idx = v.current_page_index()
+        page = v.doc.load_page(idx)
         # If page already has selectable text, ask whether to use OCR anyway.
         existing = page.get_text("text").strip()
         if existing and len(existing) > 20:
@@ -2058,12 +4632,13 @@ class MainWindow(QMainWindow):
 
     def action_ocr_selection(self):
         """Run OCR on the rectangle the user has selected on the current page."""
-        if self.viewer.doc is None or not self._check_tesseract():
+        v = self.viewer
+        if v is None or v.doc is None or not self._check_tesseract():
             return
         # Find the selected widget (page that has a non-empty selection rect).
         target = None
         sel_rect = None
-        for w in self.viewer.page_widgets:
+        for w in v.page_widgets:
             r = w.get_selection_rect_in_pdf()
             if r is not None and not r.is_empty:
                 target = w
@@ -2076,8 +4651,8 @@ class MainWindow(QMainWindow):
             )
             return
         # Map widget-zoom rect back to page coordinates accounting for rotation.
-        page = self.viewer.doc.load_page(target.page_index)
-        rot = self.viewer.rotation
+        page = v.doc.load_page(target.page_index)
+        rot = v.rotation
         if rot:
             pr = page.rect
             r = sel_rect
@@ -2104,45 +4679,103 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def action_ocr_document(self):
-        if self.viewer.doc is None or not self._check_tesseract():
+        v = self.viewer
+        if v is None or v.doc is None or not self._check_tesseract():
             return
-        suggested = os.path.splitext(os.path.basename(self.viewer.doc_path or "document.pdf"))[0] + "_ocr.txt"
+        if not v.doc_path:
+            QMessageBox.information(self, APP_NAME, "Save the PDF to disk first.")
+            return
+        suggested = os.path.splitext(os.path.basename(v.doc_path or "document.pdf"))[0] + "_ocr.txt"
         path, _ = QFileDialog.getSaveFileName(
             self, "Save OCR Text", suggested, "Text Files (*.txt)"
         )
         if not path:
             return
-        n = self.viewer.doc.page_count
+        n = v.doc.page_count
+        lang = self.ocr_language
+        doc_path = v.doc_path
+
         progress = QProgressDialog(
-            "Running OCR on entire document...", "Cancel", 0, n, self
+            "Running OCR on entire document (parallel)...", "Cancel", 0, n, self
         )
         progress.setWindowTitle("OCR in progress")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0)
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                for i in range(n):
-                    if progress.wasCanceled():
-                        break
-                    progress.setValue(i)
-                    progress.setLabelText(f"OCR page {i + 1} / {n}...")
-                    QApplication.processEvents()
-                    try:
-                        page = self.viewer.doc.load_page(i)
-                        txt = _ocr_page_text(page, language=self.ocr_language)
-                    except Exception as e:
-                        txt = f"[OCR error on page {i + 1}: {e}]"
-                    f.write(f"--- Page {i + 1} ---\n")
-                    f.write(txt)
-                    f.write("\n\n")
+        progress.setValue(0)
+
+        cancel = threading.Event()
+        progress.canceled.connect(cancel.set)
+
+        # Shared, thread-safe progress state polled by a GUI-thread timer.
+        state = {"done": 0, "finished": False, "error": None, "results": None}
+        state_lock = threading.Lock()
+
+        def _ocr_one(page, idx):
+            try:
+                return _ocr_page_text(page, language=lang)
+            except Exception as e:
+                return f"[OCR error on page {idx + 1}: {e}]"
+
+        def _bump(done, total):
+            with state_lock:
+                state["done"] = done
+
+        def _run():
+            try:
+                res = parallel_pages(
+                    doc_path, range(n), _ocr_one,
+                    cancel=cancel, on_progress=_bump,
+                )
+                with state_lock:
+                    state["results"] = res
+            except Exception as e:
+                with state_lock:
+                    state["error"] = str(e)
+            finally:
+                with state_lock:
+                    state["finished"] = True
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+
+        # Poll progress on the GUI thread; write the file once done.
+        poll = QTimer(self)
+
+        def _tick():
+            with state_lock:
+                done = state["done"]
+                finished = state["finished"]
+                error = state["error"]
+                results = state["results"]
+            if not finished:
+                progress.setValue(min(done, n))
+                progress.setLabelText(f"OCR page {done} / {n}...")
+                return
+            # Finished (or cancelled).
+            poll.stop()
             progress.setValue(n)
-        except Exception as e:
             progress.close()
-            QMessageBox.critical(self, "OCR failed", str(e))
-            return
-        if not progress.wasCanceled():
+            if error:
+                QMessageBox.critical(self, "OCR failed", error)
+                return
+            if cancel.is_set():
+                self._set_status("OCR cancelled")
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    for i in range(n):
+                        txt = (results or {}).get(i, "")
+                        f.write(f"--- Page {i + 1} ---\n")
+                        f.write(txt)
+                        f.write("\n\n")
+            except Exception as e:
+                QMessageBox.critical(self, "OCR failed", str(e))
+                return
             self._set_status(f"OCR complete: {path}")
             QMessageBox.information(self, "OCR complete", f"Text saved to:\n{path}")
+
+        poll.timeout.connect(_tick)
+        poll.start(120)
 
     def action_set_ocr_language(self):
         text, ok = QInputDialog.getText(
@@ -2155,14 +4788,141 @@ class MainWindow(QMainWindow):
             self.settings.setValue("ocr_language", self.ocr_language)
             self._set_status(f"OCR language: {self.ocr_language}")
 
-    def action_properties(self):
-        if self.viewer.doc is None:
+    # ------------------------------------------------------------------
+    # Read aloud (TTS) actions
+    # ------------------------------------------------------------------
+    def action_tts_play_pause(self):
+        v = self.viewer
+        if v is None or v.doc is None:
             return
-        dlg = PropertiesDialog(self.viewer.doc, self.viewer.doc_path or "", self)
+        # No Tesseract dependency - we extract from the PDF's text layer.
+        tts = v.get_tts()
+        # Pick up persisted settings on first activation
+        rate = int(self.settings.value("tts_rate", 180))
+        voice_id = self.settings.value("tts_voice", "", type=str)
+        tts.set_rate(rate)
+        if voice_id:
+            tts.set_voice(voice_id)
+        # Connect once per controller (cannot use UniqueConnection - it raises
+        # TypeError on duplicate connect attempts).
+        if not getattr(tts, "_state_signal_wired", False):
+            tts.stateChanged.connect(self._on_tts_state_changed)
+            tts._state_signal_wired = True
+        if tts.is_playing():
+            tts.pause()
+        else:
+            tts.play_current_page()
+
+    def action_tts_stop(self):
+        v = self.viewer
+        if v is None:
+            return
+        if hasattr(v, "_tts") and v._tts is not None:
+            v._tts.stop()
+
+    def action_create_audiobook(self):
+        v = self.viewer
+        if v is None or v.doc is None:
+            QMessageBox.information(self, APP_NAME, "Open a PDF first.")
+            return
+        if not edge_tts_available():
+            QMessageBox.warning(
+                self, "edge-tts required",
+                "Creating a natural-sounding audiobook uses Microsoft neural "
+                "voices via the 'edge-tts' package (requires internet), which "
+                "isn't installed.\n\nInstall it with:\n    pip install edge-tts\n\n"
+                "Then reopen this dialog."
+            )
+            return
+        dlg = AudiobookDialog(v, self.settings, self)
+        dlg.exec()
+
+    def _on_tts_state_changed(self, state: str):
+        if state == ReadAloudController.STATE_PLAYING:
+            self.btn_tts_play.setText("⏸ Pause")
+            self._set_status("Read aloud: playing")
+        elif state == ReadAloudController.STATE_PAUSED:
+            self.btn_tts_play.setText("▶ Resume")
+            self._set_status("Read aloud: paused")
+        elif state == ReadAloudController.STATE_EXTRACTING:
+            self.btn_tts_play.setText("… OCR")
+        else:  # IDLE
+            self.btn_tts_play.setText("▶ Read")
+
+    def _build_tts_menu(self):
+        v = self.viewer
+        self._tts_menu.clear()
+        if v is None or v.doc is None:
+            self._tts_menu.addAction("(open a PDF first)").setEnabled(False)
+            return
+        tts = v.get_tts()
+        # Voice submenu
+        voice_menu = self._tts_menu.addMenu("Voice")
+        voices = tts.list_voices()
+        cur_voice = self.settings.value("tts_voice", "", type=str)
+        if not voices:
+            voice_menu.addAction("(no voices found)").setEnabled(False)
+        else:
+            for vid, vname in voices:
+                act = QAction(vname, self, checkable=True)
+                act.setChecked(vid == cur_voice)
+                act.triggered.connect(lambda _checked=False, _id=vid: self._set_tts_voice(_id))
+                voice_menu.addAction(act)
+        # Speed submenu
+        speed_menu = self._tts_menu.addMenu("Speed")
+        cur_rate = int(self.settings.value("tts_rate", 180))
+        for label, rate in (
+            ("Slowest (100)", 100),
+            ("Slow (140)",    140),
+            ("Normal (180)",  180),
+            ("Fast (220)",    220),
+            ("Faster (260)",  260),
+            ("Fastest (300)", 300),
+        ):
+            act = QAction(label, self, checkable=True)
+            act.setChecked(rate == cur_rate)
+            act.triggered.connect(lambda _checked=False, _r=rate: self._set_tts_rate(_r))
+            speed_menu.addAction(act)
+
+    def _set_tts_voice(self, voice_id: str):
+        self.settings.setValue("tts_voice", voice_id)
+        v = self.viewer
+        if v is not None:
+            v.get_tts().set_voice(voice_id)
+        self._set_status("TTS voice updated")
+
+    def _set_tts_rate(self, rate: int):
+        self.settings.setValue("tts_rate", rate)
+        v = self.viewer
+        if v is not None:
+            v.get_tts().set_rate(rate)
+        self._set_status(f"TTS speed: {rate} wpm")
+
+    # ------------------------------------------------------------------
+    # Auto-OCR toggle
+    # ------------------------------------------------------------------
+    def _toggle_auto_ocr(self):
+        enabled = self.act_auto_ocr.isChecked()
+        self.settings.setValue("auto_ocr_enabled", enabled)
+        if enabled:
+            self._set_status("Auto-OCR enabled - will scan PDFs on open")
+            # Toggling ON is an explicit request, so force a scan even for
+            # large documents.
+            self._start_auto_ocr_for_current_viewer(force=True)
+        else:
+            self._set_status("Auto-OCR disabled")
+            self._cancel_auto_ocr()
+
+    def action_properties(self):
+        v = self.viewer
+        if v is None or v.doc is None:
+            return
+        dlg = PropertiesDialog(v.doc, v.doc_path or "", self)
         dlg.exec()
 
     def action_print(self):
-        if self.viewer.doc is None:
+        v = self.viewer
+        if v is None or v.doc is None:
             QMessageBox.information(self, APP_NAME, "Open a PDF first.")
             return
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
@@ -2172,10 +4932,10 @@ class MainWindow(QMainWindow):
         painter = QPainter(printer)
         try:
             page_rect = printer.pageRect(QPrinter.Unit.Point).toRect()
-            for i in range(self.viewer.doc.page_count):
+            for i in range(v.doc.page_count):
                 if i > 0:
                     printer.newPage()
-                page = self.viewer.doc.load_page(i)
+                page = v.doc.load_page(i)
                 z = printer.resolution() / 72.0
                 pix = page.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False)
                 img = QImage(
@@ -2198,10 +4958,14 @@ class MainWindow(QMainWindow):
     # Document open/close handlers
     # ------------------------------------------------------------------
     def _on_document_loaded(self):
-        doc = self.viewer.doc
-        if doc is None:
+        v = self.viewer
+        if v is None or v.doc is None:
             return
-        self.setWindowTitle(f"{os.path.basename(self.viewer.doc_path or '')} — {APP_NAME}")
+        doc = v.doc
+        fname = os.path.basename(v.doc_path or "")
+        self.setWindowTitle(f"{fname} — {APP_NAME}")
+        # Update the tab label
+        self.tabs.set_tab_title(v, fname)
         self.thumb_panel.populate_placeholders(doc.page_count)
         self.outline_panel.populate(doc)
         self.page_total_lbl.setText(f" / {doc.page_count} ")
@@ -2211,10 +4975,78 @@ class MainWindow(QMainWindow):
         # Restore last page
         last_page = self._get_per_file_setting("last_page")
         if isinstance(last_page, int) and 0 <= last_page < doc.page_count:
-            QTimer.singleShot(50, lambda p=last_page: self.viewer.goto_page(p))
-        # Background-render thumbnails
-        QTimer.singleShot(50, self.viewer.request_thumbnails)
-        self._on_page_changed(self.viewer.current_page_index())
+            QTimer.singleShot(50, lambda p=last_page, _v=v: _v.goto_page(p))
+        # Trigger an on-demand thumbnail request for whatever is visible in
+        # the panel right now (after the panel has had a chance to scroll to
+        # the current page). This avoids the previous approach of queuing
+        # render tasks for every page in the document.
+        QTimer.singleShot(250, self.thumb_panel._emit_visible_pages)
+        self._on_page_changed(v.current_page_index())
+        # Kick off auto-OCR (background, deferred so the UI settles first).
+        QTimer.singleShot(800, self._start_auto_ocr_for_current_viewer)
+
+    # ------------------------------------------------------------------
+    # Auto-OCR
+    # ------------------------------------------------------------------
+    # Documents larger than this are NOT auto-OCR-prescanned on open, because
+    # walking every page's text layer up front is slow and starves the render
+    # worker (thumbnails/pages appear blank). Such pages are still OCR'd
+    # on-demand when Read-Aloud / search needs them, or via the Tools > OCR
+    # menu, and the user can force a full scan by toggling Auto-OCR off/on.
+    AUTO_OCR_MAX_PAGES = 400
+
+    def _start_auto_ocr_for_current_viewer(self, force: bool = False):
+        v = self.viewer
+        if v is None or v.doc is None:
+            return
+        # Respect the user-toggleable setting (default ON).
+        enabled = self.settings.value("auto_ocr_enabled", True, type=bool)
+        if not enabled:
+            return
+        # Skip the up-front full-document scan for very large PDFs unless the
+        # user explicitly asked for it (force=True from the menu toggle).
+        if not force and v.doc.page_count > self.AUTO_OCR_MAX_PAGES:
+            self._set_status(
+                f"Large document ({v.doc.page_count} pages): auto-OCR pre-scan "
+                "skipped for speed. Pages are OCR'd on demand."
+            )
+            return
+        ctrl = v.get_auto_ocr()
+        ctrl.language = self.ocr_language
+        # Wire signals once per controller.
+        if not getattr(ctrl, "_signals_wired", False):
+            ctrl.progress.connect(self._on_auto_ocr_progress)
+            ctrl.finished.connect(self._on_auto_ocr_finished)
+            ctrl.skipped.connect(self._on_auto_ocr_skipped)
+            ctrl._signals_wired = True
+        ctrl.start()
+
+    def _cancel_auto_ocr(self):
+        v = self.viewer
+        if v is not None and hasattr(v, "_auto_ocr") and v._auto_ocr is not None:
+            v._auto_ocr.cancel()
+        self.ocr_progress_lbl.setVisible(False)
+        self.ocr_cancel_btn.setVisible(False)
+
+    @pyqtSlot(int, int)
+    def _on_auto_ocr_progress(self, done: int, total: int):
+        self.ocr_progress_lbl.setText(f"OCR: page {done}/{total}")
+        self.ocr_progress_lbl.setVisible(True)
+        self.ocr_cancel_btn.setVisible(True)
+
+    @pyqtSlot(int)
+    def _on_auto_ocr_finished(self, ocred: int):
+        self.ocr_progress_lbl.setVisible(False)
+        self.ocr_cancel_btn.setVisible(False)
+        if ocred > 0:
+            self._set_status(f"Auto-OCR done: {ocred} page(s) recognised")
+
+    @pyqtSlot(str)
+    def _on_auto_ocr_skipped(self, reason: str):
+        # Silent skip per spec - log a status message but no popup.
+        self._set_status(f"Auto-OCR skipped: {reason}")
+        self.ocr_progress_lbl.setVisible(False)
+        self.ocr_cancel_btn.setVisible(False)
 
     def _on_document_closed(self):
         self.setWindowTitle(APP_NAME)
@@ -2224,63 +5056,87 @@ class MainWindow(QMainWindow):
         self.page_input.setText("")
         self.page_total_lbl.setText(" / 0 ")
         self.search_count_lbl.setText("")
+        if self.tabs.count() == 0:
+            self._show_start_screen()
 
     def _on_thumbnail_ready(self, page_index: int, image: QImage):
         self.thumb_panel.set_thumbnail(page_index, image)
+        # Re-scroll once the thumbnail of the *current* page actually arrives.
+        # The list row resizes when an icon is set, which can push the previously-
+        # centered current row off-screen.
+        v = self.viewer
+        if v is not None and v.doc is not None and page_index == v.last_known_page():
+            self._schedule_thumb_scroll()
 
     # ------------------------------------------------------------------
     # Page nav
     # ------------------------------------------------------------------
     def _prev_page(self):
-        if self.viewer.doc:
-            self.viewer.goto_page(self.viewer.current_page_index() - 1)
+        v = self.viewer
+        if v and v.doc:
+            v.goto_page(v.current_page_index() - 1)
 
     def _next_page(self):
-        if self.viewer.doc:
-            self.viewer.goto_page(self.viewer.current_page_index() + 1)
+        v = self.viewer
+        if v and v.doc:
+            v.goto_page(v.current_page_index() + 1)
 
     def _last_page(self):
-        if self.viewer.doc:
-            self.viewer.goto_page(self.viewer.doc.page_count - 1)
+        v = self.viewer
+        if v and v.doc:
+            v.goto_page(v.doc.page_count - 1)
 
     def _goto_from_input(self):
+        v = self.viewer
+        if v is None:
+            return
         try:
-            self.viewer.goto_page(int(self.page_input.text()) - 1)
+            v.goto_page(int(self.page_input.text()) - 1)
         except ValueError:
             pass
 
     def _goto_dialog(self):
-        if self.viewer.doc is None:
+        v = self.viewer
+        if v is None or v.doc is None:
             return
         n, ok = QInputDialog.getInt(
-            self, "Go to Page", f"Page (1 - {self.viewer.doc.page_count}):",
-            self.viewer.current_page_index() + 1, 1, self.viewer.doc.page_count
+            self, "Go to Page", f"Page (1 - {v.doc.page_count}):",
+            v.current_page_index() + 1, 1, v.doc.page_count
         )
         if ok:
-            self.viewer.goto_page(n - 1)
+            v.goto_page(n - 1)
 
     def _page_down_scroll(self):
-        bar = self.viewer.verticalScrollBar()
-        bar.setValue(bar.value() + self.viewer.viewport().height())
+        v = self.viewer
+        if v is None:
+            return
+        bar = v.verticalScrollBar()
+        bar.setValue(bar.value() + v.viewport().height())
 
     def _page_up_scroll(self):
-        bar = self.viewer.verticalScrollBar()
-        bar.setValue(bar.value() - self.viewer.viewport().height())
+        v = self.viewer
+        if v is None:
+            return
+        bar = v.verticalScrollBar()
+        bar.setValue(bar.value() - v.viewport().height())
 
     # ------------------------------------------------------------------
     # Zoom helpers
     # ------------------------------------------------------------------
     def _on_zoom_combo_text(self):
+        v = self.viewer
+        if v is None:
+            return
         text = self.zoom_combo.currentText().strip().lower()
         if "width" in text:
-            self.viewer.fit_width()
+            v.fit_width()
             return
         if "page" in text:
-            self.viewer.fit_page()
+            v.fit_page()
             return
         try:
             pct = float(text.replace("%", "").strip())
-            self.viewer.set_zoom(pct / 100.0, fit_mode=None)
+            v.set_zoom(pct / 100.0, fit_mode=None)
         except ValueError:
             pass
 
@@ -2291,7 +5147,8 @@ class MainWindow(QMainWindow):
 
     def _on_view_combo(self, idx: int):
         modes = [PdfViewer.VIEW_CONTINUOUS, PdfViewer.VIEW_SINGLE, PdfViewer.VIEW_TWO]
-        self.viewer.set_view_mode(modes[idx])
+        if self.viewer is not None:
+            self.viewer.set_view_mode(modes[idx])
         self.act_continuous.blockSignals(True)
         self.act_single.blockSignals(True)
         self.act_two.blockSignals(True)
@@ -2303,13 +5160,41 @@ class MainWindow(QMainWindow):
         self.act_two.blockSignals(False)
 
     def _on_page_changed(self, idx: int):
-        if self.viewer.doc:
+        v = self.viewer
+        if v and v.doc:
             self.page_input.setText(str(idx + 1))
-            self.page_status_lbl.setText(f" {idx + 1} / {self.viewer.doc.page_count} ")
+            self.page_status_lbl.setText(f" {idx + 1} / {v.doc.page_count} ")
             if 0 <= idx < self.thumb_panel.count():
                 self.thumb_panel.blockSignals(True)
                 self.thumb_panel.setCurrentRow(idx)
                 self.thumb_panel.blockSignals(False)
+            # Debounced scroll - avoids races with row geometry changing as
+            # thumbnails finish rendering in the background.
+            self._schedule_thumb_scroll()
+
+    def _schedule_thumb_scroll(self):
+        """Coalesce many calls into a single deferred scrollToItem."""
+        if not hasattr(self, "_thumb_scroll_timer"):
+            self._thumb_scroll_timer = QTimer(self)
+            self._thumb_scroll_timer.setSingleShot(True)
+            self._thumb_scroll_timer.timeout.connect(self._do_thumb_scroll)
+        # 80 ms is enough for the QListWidget viewport to settle after
+        # row-height changes (icon arrival) and for the active-viewer-change
+        # restore to finish.
+        self._thumb_scroll_timer.start(80)
+
+    def _do_thumb_scroll(self):
+        v = self.viewer
+        if v is None or v.doc is None:
+            return
+        idx = v.last_known_page()
+        if 0 <= idx < self.thumb_panel.count():
+            item = self.thumb_panel.item(idx)
+            if item is not None:
+                # Always pin the current page to the top of the thumbnail list.
+                self.thumb_panel.scrollToItem(
+                    item, QListWidget.ScrollHint.PositionAtTop
+                )
 
     # ------------------------------------------------------------------
     # Search
@@ -2319,8 +5204,12 @@ class MainWindow(QMainWindow):
         self.search_input.selectAll()
 
     def _do_search(self):
+        v = self.viewer
+        if v is None:
+            self.search_count_lbl.setText("")
+            return
         q = self.search_input.text().strip()
-        n = self.viewer.search(q)
+        n = v.search(q)
         self.search_count_lbl.setText(f" {n} matches " if n else (" no matches " if q else ""))
 
     # ------------------------------------------------------------------
@@ -2351,16 +5240,22 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(DARK_QSS if mode == "dark" else LIGHT_QSS)
 
-        if refresh:
-            prev_render = "dark" if self.viewer.color_mode == "dark" else "light"
-            new_render = "dark" if mode == "dark" else "light"
-            self.viewer.set_color_mode(mode)
-            # Re-request thumbnails only when the underlying bitmap changes.
-            if self.viewer.doc is not None and prev_render != new_render:
-                self.viewer.thumb_cache.clear()
-                self.viewer.request_thumbnails()
-        else:
-            self.viewer.color_mode = mode
+        # Apply to all open viewers so every tab re-renders with the new mode.
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if not isinstance(w, PdfViewer):
+                continue
+            if refresh:
+                prev_render = "dark" if w.color_mode == "dark" else "light"
+                new_render = "dark" if mode == "dark" else "light"
+                w.set_color_mode(mode)
+                # Re-request thumbnails only when the underlying bitmap changes.
+                if w.doc is not None and prev_render != new_render:
+                    w.thumb_cache.clear()
+                    if w is self.viewer:
+                        w.request_thumbnails()
+            else:
+                w.color_mode = mode
 
     def _toggle_fullscreen(self):
         if self.act_full.isChecked():
@@ -2370,15 +5265,17 @@ class MainWindow(QMainWindow):
 
     def _toggle_presentation(self):
         # Presentation = single-page + fullscreen + hide UI chrome
+        v = self.viewer
         if self.act_present.isChecked():
             self._pre_present_state = (
-                self.viewer.view_mode,
+                v.view_mode if v else None,
                 self.thumb_dock.isVisible(),
                 self.outline_dock.isVisible(),
                 self.bookmarks_dock.isVisible(),
                 self.menuBar().isVisible(),
             )
-            self.viewer.set_view_mode(PdfViewer.VIEW_SINGLE)
+            if v is not None:
+                v.set_view_mode(PdfViewer.VIEW_SINGLE)
             self.thumb_dock.hide()
             self.outline_dock.hide()
             self.bookmarks_dock.hide()
@@ -2386,8 +5283,8 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
         else:
             mode, t, o, b, mb_v = getattr(self, "_pre_present_state", (None, True, True, True, True))
-            if mode is not None:
-                self.viewer.set_view_mode(mode)
+            if mode is not None and v is not None:
+                v.set_view_mode(mode)
             self.thumb_dock.setVisible(t)
             self.outline_dock.setVisible(o)
             self.bookmarks_dock.setVisible(b)
@@ -2400,21 +5297,32 @@ class MainWindow(QMainWindow):
         elif self.isFullScreen():
             self.act_full.setChecked(False)
         else:
+            # If read-aloud is active, Esc stops it first.
+            v = self.viewer
+            if v is not None and hasattr(v, "_tts") and v._tts is not None:
+                if v._tts.is_playing() or v._tts.is_paused():
+                    v._tts.stop()
+                    return
             # Otherwise: clear any text selections + search highlights
-            self.viewer.clear_all_selections()
+            if v:
+                v.clear_all_selections()
             if self.search_input.text():
                 self.search_input.clear()
-            self.viewer.search("")
+            if v:
+                v.search("")
             self.search_count_lbl.setText("")
 
     # ------------------------------------------------------------------
     # Auto-scroll
     # ------------------------------------------------------------------
     def _toggle_autoscroll(self):
-        active = self.viewer.toggle_autoscroll()
-        self._set_status("Auto-scroll ON" if active else "Auto-scroll OFF")
+        if self.viewer:
+            active = self.viewer.toggle_autoscroll()
+            self._set_status("Auto-scroll ON" if active else "Auto-scroll OFF")
 
     def _adj_autoscroll(self, delta: int):
+        if self.viewer is None:
+            return
         new_speed = max(1, self.viewer._autoscroll_speed + delta)
         self.viewer.set_autoscroll_speed(new_speed)
         self._set_status(f"Auto-scroll speed: {new_speed} px/tick")
@@ -2423,9 +5331,10 @@ class MainWindow(QMainWindow):
     # Bookmarks
     # ------------------------------------------------------------------
     def _add_bookmark(self):
-        if self.viewer.doc is None:
+        v = self.viewer
+        if v is None or v.doc is None:
             return
-        page = self.viewer.current_page_index()
+        page = v.current_page_index()
         label, ok = QInputDialog.getText(
             self, "Add Bookmark", f"Label for page {page + 1}:",
             QLineEdit.EchoMode.Normal, f"Page {page + 1}"
@@ -2435,7 +5344,8 @@ class MainWindow(QMainWindow):
         self.bookmarks_panel.add_bookmark(page, label or f"Page {page + 1}")
 
     def _save_bookmarks(self):
-        if self.viewer.doc_path:
+        v = self.viewer
+        if v is not None and v.doc_path:
             self._set_per_file_setting("bookmarks", self.bookmarks_panel.get_bookmarks())
 
     def _load_bookmarks(self):
@@ -2462,6 +5372,9 @@ class MainWindow(QMainWindow):
         items = items[:MAX_RECENT]
         self.settings.setValue("recent_files", json.dumps(items))
         self._update_recent_menu()
+        # Keep start screen in sync if it's visible
+        if hasattr(self, "_start_screen"):
+            self._start_screen.refresh(items)
 
     def _update_recent_menu(self):
         self.recent_menu.clear()
@@ -2481,13 +5394,26 @@ class MainWindow(QMainWindow):
         self.settings.setValue("recent_files", "[]")
         self._update_recent_menu()
 
+    def _clear_recent_from_start(self):
+        """Same as _clear_recent but also refresh the visible start screen."""
+        self._clear_recent()
+        self._start_screen.refresh([])
+
+    def _remove_from_recent(self, path: str):
+        """Remove a single file from the recent-files list (via a row's ✕)."""
+        items = [p for p in self._recent_files() if p != path]
+        self.settings.setValue("recent_files", json.dumps(items))
+        self._update_recent_menu()
+        self._start_screen.refresh(items)
+
     # ------------------------------------------------------------------
     # Per-file persistence
     # ------------------------------------------------------------------
     def _per_file_key(self, suffix: str) -> Optional[str]:
-        if not self.viewer.doc_path:
+        v = self.viewer
+        if v is None or not v.doc_path:
             return None
-        return f"file/{os.path.abspath(self.viewer.doc_path)}/{suffix}"
+        return f"file/{os.path.abspath(v.doc_path)}/{suffix}"
 
     def _get_per_file_setting(self, suffix: str):
         k = self._per_file_key(suffix)
@@ -2508,8 +5434,17 @@ class MainWindow(QMainWindow):
         self.settings.setValue(k, json.dumps(value))
 
     def _save_session_state(self):
-        if self.viewer.doc_path is not None:
-            self._set_per_file_setting("last_page", self.viewer.current_page_index())
+        """Persist the last-page-index for *every* open tab, not just the active one.
+
+        Uses last_known_page() (not current_page_index()) so inactive/hidden
+        viewers still report the correct page - current_page_index() relies on
+        widget visibility and would otherwise return 0 for any hidden tab.
+        """
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, PdfViewer) and w.doc_path is not None and w.doc is not None:
+                key = f"file/{os.path.abspath(w.doc_path)}/last_page"
+                self.settings.setValue(key, json.dumps(w.last_known_page()))
 
     # ------------------------------------------------------------------
     # Status
@@ -2529,7 +5464,7 @@ class MainWindow(QMainWindow):
     def _show_shortcuts(self):
         text = (
             "<table cellpadding='4'>"
-            "<tr><td><b>Open / Close</b></td><td>Ctrl+O / Ctrl+W</td></tr>"
+            "<tr><td><b>Open / New Tab / Close</b></td><td>Ctrl+O / Ctrl+T / Ctrl+W</td></tr>"
             "<tr><td><b>Save copy / Print</b></td><td>Ctrl+S / Ctrl+P</td></tr>"
             "<tr><td><b>Find / Next / Prev</b></td><td>Ctrl+F / F3 / Shift+F3</td></tr>"
             "<tr><td><b>Copy / Page text</b></td><td>Ctrl+C / Ctrl+Shift+C</td></tr>"
@@ -2554,7 +5489,7 @@ class MainWindow(QMainWindow):
         self._save_session_state()
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
-        self.viewer.shutdown()
+        self.tabs.shutdown_all()
         super().closeEvent(e)
 
     def dragEnterEvent(self, e):
@@ -2579,7 +5514,17 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    # High-DPI awareness on Windows is on by default in Qt6.
+    # ---- High-DPI setup (MUST run before QApplication is created) --------
+    # Qt6 enables high-DPI scaling by default, but the DEFAULT rounding policy
+    # rounds fractional scale factors (e.g. Windows 125% / 150%) which can make
+    # the toolbar/controls look misaligned. PassThrough keeps the exact
+    # fractional factor so the UI scales cleanly at any Windows display scale.
+    try:
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)

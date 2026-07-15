@@ -16,12 +16,13 @@
 
 ## Highlights
 
-> Built around a **background rendering thread**, **LRU pixmap cache**, and **lazy on-demand rendering** — the GUI stays responsive even on 1000+ page PDFs.
+> Built around a **parallel multi-core render pool**, **LRU pixmap cache**, and **lazy on-demand rendering** — the GUI stays responsive even on 1000+ page PDFs.
 
-- Instant document open (no upfront rasterisation)
-- Only visible pages + a small prefetch window are rendered
-- Cached bitmaps make scrolling back/forward instantaneous
-- Thumbnails stream in from a background thread — no UI freeze
+- **Instant open even for huge books** — a 1760-page PDF opens in well under a second (page widgets build in the background, no upfront rasterisation)
+- **Parallel across CPU cores** — page rendering, full-text search, whole-document OCR, and text extraction all fan out over a thread pool (each worker with its own PDF handle)
+- **Crisp on HiDPI displays** — pages render at the screen's device pixel ratio (no blurry upscaling), and the UI scales correctly at any Windows/macOS display scale
+- Only visible pages + a small prefetch window are rendered; cached bitmaps make scrolling instantaneous
+- Thumbnails show real **page previews**, streamed in from background threads — no UI freeze
 - Resize / zoom / theme changes are debounced
 - Cross-platform — runs natively on **Windows** and **macOS**
 
@@ -43,26 +44,30 @@
 - Resume last page per file
 
 #### Navigation
-- Page Thumbnails sidebar (background-generated)
+- Page Thumbnails sidebar with real **page previews** (lazy, background-generated)
 - Outline / Table of Contents sidebar
 - User Bookmarks sidebar (per-file, persisted)
 - Go to page... dialog
-- Recent files (last 10)
+- Recent files (last 10) on the start screen — remove any entry with its **✕** button
 
 </td>
 <td valign="top" width="50%">
 
 #### Text & Search
-- Full-text search with highlight + next/prev
+- Full-text search with highlight + next/prev (**parallelised** across cores)
 - Click & drag text selection (auto-clears on Esc)
 - Copy selection / Copy whole page
-- Extract entire document text to .txt
+- Extract entire document text to .txt (**parallelised**)
 
 #### OCR (Tesseract)
 - OCR current page
 - OCR a selected rectangle
-- OCR whole document (with progress dialog)
+- OCR whole document — **parallel**, cancellable progress dialog
 - Multi-language: `eng`, `fra`, `deu`, `eng+fra`, …
+
+#### Listen
+- Read Aloud (offline, sentence-highlighted)
+- **Create Audiobook from Pages** — pick pages via a preview grid and export a natural-sounding MP3/WAV using Microsoft neural voices (`edge-tts`; needs internet)
 
 #### Modern UI
 - Light & Dark themes (true PDF pixel inversion)
@@ -94,6 +99,8 @@
 | **PyQt6**   | `>=6.5.0`  | GUI framework (Qt6 bindings) |
 | **PyMuPDF** | `>=1.23.0` | PDF rendering, search, text extraction, OCR (`fitz`) |
 | **Pillow**  | `>=10.0.0` | PNG → ICO conversion for the build script |
+| **pyttsx3** | `>=2.90`   | Offline Read-Aloud (system SAPI/NSSpeech voices) — *optional* |
+| **edge-tts**| `>=6.1.0`  | Natural neural voices for the **Create Audiobook** feature (requires internet) — *optional* |
 
 ---
 
@@ -115,6 +122,9 @@ python -m venv venv
 :: 4. Upgrade pip and install all dependencies
 python -m pip install --upgrade pip
 pip install "PyQt6>=6.5.0" "PyMuPDF>=1.23.0" "Pillow>=10.0.0"
+
+:: 5. (Optional) Read-Aloud + natural-voice Audiobook export
+pip install pyttsx3 edge-tts
 ```
 
 To leave the venv later: `deactivate`
@@ -137,6 +147,9 @@ source venv/bin/activate
 # 4. Upgrade pip and install all dependencies
 python -m pip install --upgrade pip
 pip install "PyQt6>=6.5.0" "PyMuPDF>=1.23.0" "Pillow>=10.0.0"
+
+# 5. (Optional) Read-Aloud + natural-voice Audiobook export
+pip install pyttsx3 edge-tts
 ```
 
 To leave the venv later: `deactivate`
@@ -169,7 +182,7 @@ You can also drag & drop any PDF onto the window.
 
 ## Build a standalone app
 
-PyInstaller bundles Python, Qt, and PyMuPDF into a single distributable. Build scripts live in **`build/`** and use **`build/App_icon.png`** as the application icon.
+PyInstaller bundles Python, Qt, and PyMuPDF into a distributable **folder** (`--onedir`, which launches instantly with no self-extraction). Build scripts live in **`build/`** and use **`build/App_icon.png`** as the application icon.
 
 ### Application icon
 
@@ -187,7 +200,7 @@ If `App_icon.png` is missing, the build still succeeds — just without a custom
 > Make sure your venv is set up (see *Quick Start* above). The build scripts use the venv's Python automatically.
 
 <details open>
-<summary><b>Windows  →  <code>dist\JPDFReader.exe</code></b></summary>
+<summary><b>Windows  →  <code>dist\JPDFReader\JPDFReader.exe</code></b></summary>
 
 From the project root:
 
@@ -200,11 +213,13 @@ What it does:
 2. Installs/upgrades **PyInstaller** and **Pillow** into the venv
 3. Generates `build\App_icon.ico` from `build\App_icon.png`
 4. Cleans previous builds (`build_temp\`, `dist\`, stale `.spec`)
-5. Runs PyInstaller with `--onefile --windowed`, embedding the icon
+5. Runs PyInstaller with `--onedir --windowed`, bundling `edge-tts`/`pyttsx3` and embedding the icon
 6. **On success**, deletes the generated `App_icon.ico`, the `build_temp\` folder and the `.spec` file so the working tree stays clean
 7. **On failure**, keeps `App_icon.ico` and prints a clear `BUILD FAILED` message so you can retry
 
-Output: **`dist\JPDFReader.exe`** — a single ~80 MB executable. Copy it to any Windows machine and run it; no Python install required.
+Output: **`dist\JPDFReader\`** — a folder containing `JPDFReader.exe` and its dependencies. **Distribute the whole folder** (e.g. zip it). Run `JPDFReader.exe` inside it; no Python install required, and it launches instantly with no extraction step.
+
+> **Tip:** close any running `JPDFReader.exe` before rebuilding — a running instance locks the files in `dist\` and the build will fail with *"Access is denied"*.
 
 </details>
 
@@ -227,7 +242,7 @@ What it does:
 2. Installs/upgrades **PyInstaller** into the venv
 3. Generates `build/App_icon.icns` from `build/App_icon.png` (via `sips` + `iconutil`)
 4. Cleans previous builds (`build_temp/`, `dist/`, stale `.spec`)
-5. Runs PyInstaller with `--windowed --osx-bundle-identifier com.jpdfreader.app`, embedding the icon
+5. Runs PyInstaller with `--windowed --osx-bundle-identifier com.jpdfreader.app`, bundling `edge-tts`/`pyttsx3` and embedding the icon
 6. **On success**, deletes the generated `App_icon.icns`, the `build_temp/` folder and the `.spec` file so the working tree stays clean
 7. **On failure**, keeps `App_icon.icns` and prints a clear `BUILD FAILED` message so you can retry
 
@@ -247,12 +262,15 @@ If you want to invoke PyInstaller directly (or your CI does), the equivalent com
 
 **Windows:**
 ```powershell
-pyinstaller --noconfirm --clean --windowed --onefile `
+pyinstaller --noconfirm --clean --windowed --onedir `
     --name "JPDFReader" `
     --icon "build\App_icon.ico" `
     --add-data "build\App_icon.png;." `
     --workpath build_temp --specpath build_temp --distpath dist `
     --collect-submodules fitz --collect-submodules PyQt6 `
+    --collect-submodules pyttsx3 --hidden-import pyttsx3.drivers `
+    --hidden-import pyttsx3.drivers.sapi5 --hidden-import comtypes `
+    --collect-submodules edge_tts --collect-submodules aiohttp `
     pdf_reader.py
 ```
 
@@ -265,6 +283,8 @@ pyinstaller --noconfirm --clean --windowed \
     --add-data "build/App_icon.png:." \
     --workpath build_temp --specpath build_temp --distpath dist \
     --collect-submodules fitz --collect-submodules PyQt6 \
+    --collect-submodules pyttsx3 \
+    --collect-submodules edge_tts --collect-submodules aiohttp \
     pdf_reader.py
 ```
 
@@ -338,10 +358,48 @@ From the **Tools** menu or the **OCR** toolbar button:
 |--------|-------------|
 | **OCR Current Page**       | Recognises text on the current page; shows it in a dialog with copy/save buttons |
 | **OCR Selection**          | Drag a rectangle first, then run — perfect for grabbing a single paragraph or table cell |
-| **OCR Whole Document...**  | OCR every page sequentially with a cancellable progress dialog; saves to `.txt` |
+| **OCR Whole Document...**  | OCRs every page **in parallel across CPU cores** with a cancellable progress dialog; saves to `.txt` in page order |
 | **Set OCR Language...**    | e.g. `eng`, `fra`, `deu`, `spa`, or combinations like `eng+fra` |
 
 > If a page already contains selectable text, the app offers to use it directly instead of running (slower) OCR.
+
+---
+
+## Audiobook Export (natural neural voices)
+
+Turn any range of pages into a **natural-sounding audiobook** file. Unlike the offline
+Read-Aloud feature (which uses robotic system voices), this uses Microsoft's **neural
+text-to-speech** voices via [`edge-tts`](https://github.com/rany2/edge-tts).
+
+### Requirements
+
+```bash
+pip install edge-tts
+```
+
+> **Requires an internet connection** — `edge-tts` streams synthesized audio from
+> Microsoft's cloud service. It is free and needs no API key. If `edge-tts` isn't
+> installed or you're offline, the app tells you clearly instead of failing silently.
+
+### Using it
+
+Open **Tools → Create Audiobook from Pages…** (or the **🎧 Audiobook** toolbar
+button, or press `Ctrl/⌘+Shift+B`). A dialog opens with:
+
+| Control | What it does |
+|--------|-------------|
+| **Page preview grid** | A scrollable grid of page thumbnails, each with a checkbox. The current page is preselected. |
+| **Select All / Clear** | Toggle every page at once. |
+| **Range** | Type e.g. `1-5, 8, 12` and click **Apply** to select those pages. |
+| **Voice** | Pick from 300+ neural voices (accents/languages fetched live). Defaults to **Aria (US English)**; your choice is remembered. |
+| **Speed** | Slow / Normal / Fast / Faster. |
+| **Format** | **MP3** (default) or **WAV** (WAV conversion needs `ffmpeg` on PATH). |
+| **Generate Audiobook…** | Choose an output file; a progress bar shows per-page synthesis. When finished you can open the file directly. |
+
+Text is taken from each page's embedded text layer, falling back to OCR results
+(enable **Auto-OCR Scanned Pages** in the Tools menu first for scanned PDFs).
+
+Works on both **Windows and macOS**.
 
 ---
 
@@ -349,12 +407,26 @@ From the **Tools** menu or the **OCR** toolbar button:
 
 True dark mode — not just a tinted background:
 
-1. Each PDF page is rendered to a pixmap via PyMuPDF on the background thread.
+1. Each PDF page is rendered to a pixmap via PyMuPDF on a background render thread, at the screen's **device pixel ratio** so it stays crisp on HiDPI displays.
 2. A C-implemented per-pixel RGB inversion (`QImage.invertPixels`) is applied.
 3. White backgrounds become deep black, dark text becomes light, while colored figures remain recognisable.
 4. A modern dark Qt stylesheet wraps the rest of the UI.
 
 **Sepia mode** is essentially free: it reuses the light bitmap and overlays a translucent warm tint at paint-time via `CompositionMode_Multiply` — no extra render needed.
+
+---
+
+## Performance & Parallelism
+
+The app is designed to stay responsive on very large documents and to use all your CPU cores:
+
+- **Parallel render pool** — a pool of worker threads (up to `cores − 1`, capped at 6) renders pages concurrently. PyMuPDF isn't safe sharing one document across threads, so **each worker opens its own PDF handle**.
+- **Chunked open** — opening a huge PDF builds the first pages immediately and creates the remaining page placeholders in the background, so the window is interactive right away (a 1760-page book opens in well under a second).
+- **Parallel batch jobs** — full-text search, whole-document OCR, and text extraction fan out over a thread pool (`concurrent.futures`), each thread with its own PDF handle; results are reassembled in page order.
+- **HiDPI-correct rendering** — pixmaps are rasterised at `zoom × devicePixelRatio` and tagged with the ratio, so pages are pixel-sharp and never upscaled/blurred. The UI uses Qt's `PassThrough` high-DPI rounding for clean scaling at 125% / 150% display scales.
+- **Caching & laziness** — an LRU pixmap cache plus visible-only rendering keep scrolling instant; thumbnails and page-size refinement are computed lazily only for what's on screen.
+
+All of this uses `os.cpu_count()`, `threading`, and `concurrent.futures` — identical behaviour on **Windows and macOS**.
 
 ---
 
@@ -367,7 +439,7 @@ J_PDF_READER/
 │   ├── App_icon.png           # User-provided square PNG icon (1024x1024 recommended)
 │   ├── make_icon.py           # PNG -> ICO converter (Windows; uses Pillow)
 │   ├── _pyinstaller_runner.py # PyInstaller wrapper that patches Python 3.10.0 dis bug
-│   ├── build_windows.bat      # Build dist\JPDFReader.exe
+│   ├── build_windows.bat      # Build dist\JPDFReader\ (folder with JPDFReader.exe)
 │   └── build_mac.command      # Build dist/JPDFReader.app (double-clickable on macOS)
 ├── venv/                      # Local virtual environment (git-ignored)
 ├── dist/                      # Build output (git-ignored)
@@ -387,7 +459,10 @@ Dependencies are installed manually via `pip install` — see [Prerequisites](#p
 | GUI              | PyQt6 — Qt6 bindings, native on Windows & macOS       |
 | PDF engine       | PyMuPDF (`fitz`) — rendering, search, text, OCR       |
 | OCR engine       | Tesseract (external; called via PyMuPDF)              |
-| Packaging        | PyInstaller — single-file `.exe` / `.app` bundle      |
+| Read-Aloud (TTS) | pyttsx3 — offline system voices (SAPI5 / NSSpeech)    |
+| Audiobook (TTS)  | edge-tts — Microsoft neural voices (online, free)     |
+| Parallelism      | `threading` + `concurrent.futures` render/CPU pools   |
+| Packaging        | PyInstaller — `--onedir` folder (`.exe`) / `.app` bundle |
 
 ---
 
@@ -427,6 +502,20 @@ Or right-click the app → **Open** → **Open** in the warning dialog.
 <summary><b>OCR fails with "Tesseract not found"</b></summary>
 
 The auto-detector checks PATH plus standard install locations (`C:\Program Files\Tesseract-OCR\` on Windows, `/opt/homebrew/bin/` and `/usr/local/bin/` on macOS). If your install lives elsewhere, add that directory to PATH before launching the app.
+
+</details>
+
+<details>
+<summary><b>Windows build fails with "Access is denied" in <code>dist\</code></b></summary>
+
+A running instance of `JPDFReader.exe` locks the files being overwritten. Close the app (or `taskkill /IM JPDFReader.exe /F`) and rebuild.
+
+</details>
+
+<details>
+<summary><b>Audiobook says edge-tts is missing / can't connect</b></summary>
+
+Install it into the venv with `pip install edge-tts`. It streams neural-voice audio from Microsoft's free cloud service, so it **requires an internet connection** — if you're offline the dialog reports it instead of failing silently. WAV output additionally needs `ffmpeg` on PATH (MP3 does not).
 
 </details>
 

@@ -1,7 +1,10 @@
 @echo off
 REM ===========================================================================
 REM  Build a standalone Windows .exe of J PDF Reader.
-REM  Output: <project root>\dist\JPDFReader.exe (single file, no console).
+REM  Output: <project root>\dist\JPDFReader\ folder containing JPDFReader.exe
+REM
+REM  Distributed as a folder (zip it up) for instant startup - no extraction
+REM  overhead compared to the --onefile single-exe approach.
 REM
 REM  Run from any cwd:   build\build_windows.bat
 REM ===========================================================================
@@ -17,7 +20,7 @@ if not exist "venv\Scripts\python.exe" (
     echo Create it first:
     echo     python -m venv venv
     echo     .\venv\Scripts\activate
-    echo     pip install PyQt6 PyMuPDF Pillow
+    echo     pip install PyQt6 PyMuPDF Pillow pyttsx3 edge-tts
     echo.
     echo See README.md for the full setup instructions.
     echo.
@@ -65,12 +68,12 @@ if exist "%ROOT%\build\App_icon.ico" set "ICON_FLAG=--icon=%ROOT%\build\App_icon
 if exist "%ROOT%\build\App_icon.png" set "ADD_DATA_FLAG=--add-data=%ROOT%\build\App_icon.png;."
 
 echo.
-echo ===== Building JPDFReader.exe (one-file, windowed) =====
+echo ===== Building JPDFReader.exe (one-dir, windowed) =====
 "%PY%" "%ROOT%\build\_pyinstaller_runner.py" ^
     --noconfirm ^
     --clean ^
     --windowed ^
-    --onefile ^
+    --onedir ^
     --name "JPDFReader" ^
     --workpath "%ROOT%\build_temp" ^
     --distpath "%ROOT%\dist" ^
@@ -78,6 +81,12 @@ echo ===== Building JPDFReader.exe (one-file, windowed) =====
     %ADD_DATA_FLAG% ^
     --collect-submodules fitz ^
     --collect-submodules PyQt6 ^
+    --collect-submodules pyttsx3 ^
+    --hidden-import pyttsx3.drivers ^
+    --hidden-import pyttsx3.drivers.sapi5 ^
+    --hidden-import comtypes ^
+    --collect-submodules edge_tts ^
+    --collect-submodules aiohttp ^
     "%ROOT%\pdf_reader.py"
 
 set "BUILD_RC=%ERRORLEVEL%"
@@ -86,7 +95,7 @@ REM ----------------------------------------------------------------------
 REM  Verify the .exe exists; only then clean up and report success.
 REM ----------------------------------------------------------------------
 if not "%BUILD_RC%"=="0" goto :build_failed
-if not exist "%ROOT%\dist\JPDFReader.exe" goto :build_failed
+if not exist "%ROOT%\dist\JPDFReader\JPDFReader.exe" goto :build_failed
 
 echo.
 echo ===== Cleaning up generated icon and intermediate files =====
@@ -105,10 +114,11 @@ if exist "%ROOT%\xref-JPDFReader.html"    del /q "%ROOT%\xref-JPDFReader.html"
 echo.
 echo ===== BUILD COMPLETE =====
 echo.
-echo Output:  %ROOT%\dist\JPDFReader.exe
-for %%F in ("%ROOT%\dist\JPDFReader.exe") do echo Size:    %%~zF bytes
+echo Output:  %ROOT%\dist\JPDFReader\
+echo Exe:     %ROOT%\dist\JPDFReader\JPDFReader.exe
 echo.
-echo Copy that single .exe to any Windows machine and run it.
+echo Distribute the entire dist\JPDFReader\ folder (e.g. zip it up).
+echo Run JPDFReader.exe inside that folder - launches instantly, no extraction.
 echo (Tesseract is only required for OCR features; not bundled.)
 echo.
 endlocal
@@ -118,7 +128,7 @@ exit /b 0
 echo.
 echo ===== BUILD FAILED =====
 echo.
-echo PyInstaller did not produce dist\JPDFReader.exe.
+echo PyInstaller did not produce dist\JPDFReader\JPDFReader.exe.
 echo Scroll up for the underlying error.
 echo.
 echo The generated icon file build\App_icon.ico has been kept so you can retry.

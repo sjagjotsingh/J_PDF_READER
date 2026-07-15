@@ -25,7 +25,7 @@ ERROR: venv not found in project root.
 Create it first:
     python3 -m venv venv
     source venv/bin/activate
-    pip install PyQt6 PyMuPDF Pillow
+    pip install PyQt6 PyMuPDF Pillow pyttsx3 edge-tts
 
 See README.md for the full setup instructions.
 
@@ -110,6 +110,9 @@ set +e
     $ADD_DATA_FLAG \
     --collect-submodules fitz \
     --collect-submodules PyQt6 \
+    --collect-submodules pyttsx3 \
+    --collect-submodules edge_tts \
+    --collect-submodules aiohttp \
     "$ROOT/pdf_reader.py"
 BUILD_RC=$?
 set -e

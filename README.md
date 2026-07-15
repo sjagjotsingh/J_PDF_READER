@@ -48,7 +48,7 @@
 - Outline / Table of Contents sidebar
 - User Bookmarks sidebar (per-file, persisted)
 - Go to page... dialog
-- Recent files (last 10) on the start screen — remove any entry with its **✕** button
+- Recent files (up to 10 remembered; newest 5 shown on the start screen) — remove any entry with its **✕** button
 
 </td>
 <td valign="top" width="50%">
@@ -68,11 +68,13 @@
 #### Listen
 - Read Aloud (offline, sentence-highlighted)
 - **Create Audiobook from Pages** — pick pages via a preview grid and export a natural-sounding MP3/WAV using Microsoft neural voices (`edge-tts`; needs internet)
+- **Whole Book by Chapters** — auto-split the entire book by its table of contents and export **one audio file per chapter** into a folder
 
 #### Modern UI
 - Light & Dark themes (true PDF pixel inversion)
 - Sepia reading tint
 - Rounded controls, accent-blue highlights
+- Wrapping toolbar — controls flow onto extra rows when the window narrows (nothing is hidden behind a `>>` overflow menu)
 - Persistent window state & preferences
 - Drag-and-drop a PDF anywhere
 
@@ -398,6 +400,21 @@ button, or press `Ctrl/⌘+Shift+B`). A dialog opens with:
 
 Text is taken from each page's embedded text layer, falling back to OCR results
 (enable **Auto-OCR Scanned Pages** in the Tools menu first for scanned PDFs).
+
+### Whole Book by Chapters
+
+If the PDF has a table of contents, the same dialog offers **Whole Book by
+Chapters…** — it splits the entire book by its top-level TOC entries and exports
+**one audio file per chapter**:
+
+| Control | What it does |
+|--------|-------------|
+| **Chapter list** | A checkable list of the book's chapters with their page ranges. Numbered chapters (e.g. "Chapter 3") are pre-selected. |
+| **Numbered / All / None** | Quickly choose which chapters to export. |
+| **Whole Book by Chapters (N)…** | Extracts each selected chapter's text (in parallel), synthesizes each with the chosen voice/speed, and writes files into a new **`<Book Name> - Audiobook`** sub-folder in a folder you pick. Each file starts by reading the chapter title. |
+
+If the PDF has no table of contents, this option is disabled and you can still
+use **Create Audiobook from Pages** instead.
 
 Works on both **Windows and macOS**.
 

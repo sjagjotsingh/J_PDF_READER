@@ -87,6 +87,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -114,6 +115,128 @@ APP_NAME = "J PDF Reader"
 ORG_NAME = "JPDFReader"
 
 
+class FlowLayout(QLayout):
+    """A layout that arranges child widgets left-to-right and WRAPS them onto
+    new rows when they run out of horizontal space. Used for the main toolbar
+    so every control is always visible (wrapping to more rows) instead of
+    being hidden behind a '>>' overflow menu."""
+
+    def __init__(self, parent=None, margin=4, hspacing=6, vspacing=6):
+        super().__init__(parent)
+        self._items: List = []
+        self._hspace = hspacing
+        self._vspace = vspacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self):
+        while self._items:
+            self._items.pop()
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        line_height = 0
+        right = rect.right() - m.right()
+        for item in self._items:
+            w = item.sizeHint()
+            next_x = x + w.width()
+            if next_x - 1 > right and line_height > 0:
+                # Wrap to next row.
+                x = rect.x() + m.left()
+                y = y + line_height + self._vspace
+                next_x = x + w.width()
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), w))
+            x = next_x + self._hspace
+            line_height = max(line_height, w.height())
+        return y + line_height - rect.y() + m.bottom()
+
+
+class _FlowStrip(QWidget):
+    """Container for the toolbar's FlowLayout.
+
+    Crucially, its width size hint does NOT grow with its contents (that would
+    push the toolbar/window ever wider and cause runaway horizontal growth).
+    Instead it accepts whatever width it's given and reports the wrapped height
+    via heightForWidth, so the FlowLayout wraps buttons onto more rows.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Expanding width so the QToolBar's internal box layout stretches us to
+        # the full toolbar width; height follows width via heightForWidth.
+        pol = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        pol.setHeightForWidth(True)
+        self.setSizePolicy(pol)
+        self.setMinimumWidth(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            return lay.heightForWidth(w)
+        return super().heightForWidth(w)
+
+    def sizeHint(self):
+        # Report a modest width (never the full content width) so we don't
+        # force the toolbar to expand; height follows from heightForWidth.
+        lay = self.layout()
+        h = lay.heightForWidth(self.width() or 400) if lay is not None else 36
+        return QSize(200, max(36, h))
+
+    def minimumSizeHint(self):
+        return QSize(0, 36)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        # When our width changes, our wrapped height may change too.
+        self.updateGeometry()
+
+
 def _resource_path(name: str) -> str:
     """
     Locate a bundled resource. Works in three modes:
@@ -137,6 +260,7 @@ def _resource_path(name: str) -> str:
 
 
 MAX_RECENT = 10
+START_RECENT = 5               # recent files shown on the start screen (newest)
 RENDER_CACHE_MAX = 60          # cached rendered pages
 THUMB_CACHE_MAX = 1000         # plenty of thumbs
 PREFETCH_BEFORE = 1            # pages to render before viewport
@@ -153,6 +277,10 @@ LIGHT_QSS = """
 
 QMainWindow, QWidget, QDialog { background-color: #f5f6f8; color: #1f2328; }
 
+QWidget#toolbarStrip {
+    background-color: #ffffff;
+    border-bottom: 1px solid #e1e4e8;
+}
 QToolBar {
     background-color: #ffffff;
     border: none;
@@ -320,6 +448,10 @@ DARK_QSS = """
 
 QMainWindow, QWidget, QDialog { background-color: #181a1f; color: #e6e6e6; }
 
+QWidget#toolbarStrip {
+    background-color: #20232a;
+    border-bottom: 1px solid #2c2f36;
+}
 QToolBar {
     background-color: #20232a;
     border: none;
@@ -2116,10 +2248,12 @@ class OutlinePanel(QTreeWidget):
         self.setHeaderHidden(True)
         self.itemClicked.connect(self._on_clicked)
 
-    def populate(self, doc: Optional[fitz.Document]):
+    def populate(self, doc: Optional[fitz.Document]) -> bool:
+        """Populate the outline tree. Returns True if the document has a
+        non-empty outline / table of contents."""
         self.clear()
         if doc is None:
-            return
+            return False
         try:
             toc = doc.get_toc(simple=True)
         except Exception:
@@ -2128,7 +2262,7 @@ class OutlinePanel(QTreeWidget):
             empty = QTreeWidgetItem(["(No outline / bookmarks)"])
             empty.setDisabled(True)
             self.addTopLevelItem(empty)
-            return
+            return False
         stack: List[Tuple[int, QTreeWidgetItem]] = []
         for entry in toc:
             level, title, page = entry[0], entry[1], entry[2]
@@ -2139,6 +2273,7 @@ class OutlinePanel(QTreeWidget):
             (stack[-1][1].addChild if stack else self.addTopLevelItem)(it)
             stack.append((level, it))
         self.expandToDepth(1)
+        return True
 
     def _on_clicked(self, item: QTreeWidgetItem, _col: int):
         page = item.data(0, Qt.ItemDataRole.UserRole)
@@ -3107,6 +3242,17 @@ def _fetch_edge_tts_voices() -> List[Tuple[str, str]]:
     return voices
 
 
+def _safe_filename(name: str, maxlen: int = 60) -> str:
+    """Turn an arbitrary chapter title into a safe file name (no path chars)."""
+    name = (name or "").strip()
+    # Remove characters illegal on Windows/macOS filesystems.
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if len(name) > maxlen:
+        name = name[:maxlen].rstrip()
+    return name
+
+
 class AudiobookWorker(QObject):
     """Generates an audiobook file from text using edge-tts on a background
     thread with its own asyncio event loop.
@@ -3117,16 +3263,25 @@ class AudiobookWorker(QObject):
     """
 
     progress = pyqtSignal(int, int, str)   # done, total, human status
-    finished = pyqtSignal(str)             # output file path
+    finished = pyqtSignal(str)             # output file path (or folder)
     failed = pyqtSignal(str)               # error message
 
     def __init__(self, chunks: List[str], voice: str, rate_pct: int,
-                 out_path: str, parent=None):
+                 out_path: str, chapters: Optional[List[Tuple[str, str]]] = None,
+                 out_dir: Optional[str] = None, parent=None):
+        """
+        Two modes:
+          * Single file  -> pass `chunks` (one string per page) + `out_path`.
+          * By chapters  -> pass `chapters` as [(chapter_title, text), ...] and
+                            `out_dir`; one audio file is written per chapter.
+        """
         super().__init__(parent)
         self._chunks = chunks           # one string per selected page
         self._voice = voice
         self._rate_pct = rate_pct       # -50..+100, edge-tts "rate" percent
         self._out_path = out_path
+        self._chapters = chapters
+        self._out_dir = out_dir
         self._cancel = threading.Event()
 
     def cancel(self):
@@ -3135,22 +3290,46 @@ class AudiobookWorker(QObject):
     @pyqtSlot()
     def run(self):
         try:
-            import edge_tts  # type: ignore
+            import edge_tts  # type: ignore  # noqa: F401
         except Exception:
             self.failed.emit(
                 "The 'edge-tts' package is not installed.\n\n"
                 "Install it with:\n    pip install edge-tts"
             )
             return
+        if self._chapters is not None:
+            self._run_chapters()
+        else:
+            self._run_single()
 
+    # ------------------------------------------------------------------
+    def _rate_str(self) -> str:
+        return f"{'+' if self._rate_pct >= 0 else ''}{self._rate_pct}%"
+
+    async def _synth_text_to_file(self, text: str, mp3_path: str):
+        """Synthesize one blob of text into a single MP3 file."""
+        import edge_tts  # type: ignore
+        with open(mp3_path, "wb") as out:
+            text = (text or "").strip()
+            if not text:
+                return
+            communicate = edge_tts.Communicate(text, self._voice, rate=self._rate_str())
+            async for chunk in communicate.stream():
+                if self._cancel.is_set():
+                    raise RuntimeError("cancelled")
+                if chunk.get("type") == "audio":
+                    out.write(chunk["data"])
+
+    # ------------------------------------------------------------------
+    def _run_single(self):
         import asyncio
         import tempfile
 
-        rate_str = f"{'+' if self._rate_pct >= 0 else ''}{self._rate_pct}%"
+        rate_str = self._rate_str()
         total = len(self._chunks)
 
         async def _synth_all(mp3_path: str):
-            # Write all pages sequentially into one MP3 stream.
+            import edge_tts  # type: ignore
             with open(mp3_path, "wb") as out:
                 for i, text in enumerate(self._chunks):
                     if self._cancel.is_set():
@@ -3159,9 +3338,7 @@ class AudiobookWorker(QObject):
                     text = (text or "").strip()
                     if not text:
                         continue
-                    communicate = edge_tts.Communicate(
-                        text, self._voice, rate=rate_str
-                    )
+                    communicate = edge_tts.Communicate(text, self._voice, rate=rate_str)
                     async for chunk in communicate.stream():
                         if self._cancel.is_set():
                             raise RuntimeError("cancelled")
@@ -3204,13 +3381,7 @@ class AudiobookWorker(QObject):
             else:
                 self.failed.emit(str(e))
         except Exception as e:
-            msg = str(e)
-            # Common offline signature from aiohttp / websockets.
-            if any(s in msg.lower() for s in ("getaddrinfo", "connect", "network", "resolve", "temporary failure")):
-                msg = ("Could not reach the Microsoft neural-voice service.\n\n"
-                       "edge-tts requires an internet connection. Please check "
-                       "your connection and try again.\n\nDetails: " + msg)
-            self.failed.emit(msg)
+            self.failed.emit(self._friendly_error(e))
         finally:
             try:
                 loop.close()
@@ -3221,6 +3392,81 @@ class AudiobookWorker(QObject):
                     os.remove(tmp_mp3)
                 except Exception:
                     pass
+
+    # ------------------------------------------------------------------
+    def _run_chapters(self):
+        """Synthesize one audio file per chapter into self._out_dir."""
+        import asyncio
+        import tempfile
+
+        want_wav = self._out_path.lower().endswith(".wav")
+        ext = "wav" if want_wav else "mp3"
+        chapters = self._chapters or []
+        total = len(chapters)
+
+        loop = asyncio.new_event_loop()
+        written: List[str] = []
+        try:
+            asyncio.set_event_loop(loop)
+            for i, (title, text) in enumerate(chapters):
+                if self._cancel.is_set():
+                    self.failed.emit("Cancelled.")
+                    return
+                safe = _safe_filename(title) or f"Chapter {i + 1}"
+                base = f"{i + 1:02d} - {safe}"
+                self.progress.emit(i, total, f"Chapter {i + 1} of {total}: {title[:40]}")
+                if not (text or "").strip():
+                    continue
+
+                if want_wav:
+                    fd, tmp_mp3 = tempfile.mkstemp(suffix=".mp3")
+                    os.close(fd)
+                    try:
+                        loop.run_until_complete(self._synth_text_to_file(text, tmp_mp3))
+                        wav_path = os.path.join(self._out_dir, base + ".wav")
+                        if not self._convert_mp3_to_wav(tmp_mp3, wav_path):
+                            self.failed.emit(
+                                "WAV output needs ffmpeg on PATH. Try MP3 format instead."
+                            )
+                            return
+                        written.append(wav_path)
+                    finally:
+                        if os.path.isfile(tmp_mp3):
+                            try:
+                                os.remove(tmp_mp3)
+                            except Exception:
+                                pass
+                else:
+                    mp3_path = os.path.join(self._out_dir, base + ".mp3")
+                    loop.run_until_complete(self._synth_text_to_file(text, mp3_path))
+                    written.append(mp3_path)
+
+            if self._cancel.is_set():
+                self.failed.emit("Cancelled.")
+                return
+            self.progress.emit(total, total, "Done.")
+            self.finished.emit(self._out_dir)
+        except RuntimeError as e:
+            if str(e) == "cancelled":
+                self.failed.emit("Cancelled.")
+            else:
+                self.failed.emit(str(e))
+        except Exception as e:
+            self.failed.emit(self._friendly_error(e))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _friendly_error(e: Exception) -> str:
+        msg = str(e)
+        if any(s in msg.lower() for s in ("getaddrinfo", "connect", "network", "resolve", "temporary failure")):
+            return ("Could not reach the Microsoft neural-voice service.\n\n"
+                    "edge-tts requires an internet connection. Please check "
+                    "your connection and try again.\n\nDetails: " + msg)
+        return msg
 
     @staticmethod
     def _convert_mp3_to_wav(mp3_path: str, wav_path: str) -> bool:
@@ -3295,11 +3541,12 @@ class AudiobookDialog(QDialog):
         self.doc = viewer.doc
         self.settings = settings
         self._tiles: List[_PageTile] = []
+        self._chapter_items: List[QTreeWidgetItem] = []
         self._worker: Optional[AudiobookWorker] = None
         self._thread: Optional[QThread] = None
 
         self.setWindowTitle("Create Audiobook from Pages")
-        self.resize(760, 640)
+        self.resize(860, 760)
 
         root = QVBoxLayout(self)
 
@@ -3331,6 +3578,28 @@ class AudiobookDialog(QDialog):
         self.grid.setSpacing(10)
         self.scroll.setWidget(grid_host)
         root.addWidget(self.scroll, 1)
+
+        # --- chapter split controls ---------------------------------------
+        chapter_head = QHBoxLayout()
+        self.chapter_lbl = QLabel("Chapters for whole-book split:")
+        chapter_head.addWidget(self.chapter_lbl, 1)
+        self.btn_ch_num = QPushButton("Select Numbered")
+        self.btn_ch_all = QPushButton("Select All")
+        self.btn_ch_none = QPushButton("Clear")
+        self.btn_ch_num.clicked.connect(self._select_numbered_chapters)
+        self.btn_ch_all.clicked.connect(lambda: self._set_all_chapters(True))
+        self.btn_ch_none.clicked.connect(lambda: self._set_all_chapters(False))
+        chapter_head.addWidget(self.btn_ch_num)
+        chapter_head.addWidget(self.btn_ch_all)
+        chapter_head.addWidget(self.btn_ch_none)
+        root.addLayout(chapter_head)
+        self.chapter_tree = QTreeWidget()
+        self.chapter_tree.setHeaderLabels(["Create", "Pages", "Chapter"])
+        self.chapter_tree.setRootIsDecorated(False)
+        self.chapter_tree.setAlternatingRowColors(True)
+        self.chapter_tree.setMaximumHeight(150)
+        self.chapter_tree.itemChanged.connect(lambda *_: self._update_chapter_count())
+        root.addWidget(self.chapter_tree)
 
         # --- bottom: voice / format / actions -----------------------------
         opts = QHBoxLayout()
@@ -3368,21 +3637,33 @@ class AudiobookDialog(QDialog):
         self.sel_count_lbl = QLabel("0 pages selected")
         actions.addWidget(self.sel_count_lbl)
         actions.addStretch(1)
-        self.btn_generate = QPushButton("Generate Audiobook…")
+        # Whole-book, split into one file per top-level chapter (uses the TOC).
+        self.btn_chapters = QPushButton("Whole Book by Chapters…")
+        self.btn_chapters.setToolTip(
+            "Generate the entire book as one audio file per chapter, using the "
+            "document's table of contents."
+        )
+        self.btn_chapters.clicked.connect(self._generate_chapters)
+        self.btn_generate = QPushButton("Generate from Selection…")
         self.btn_generate.clicked.connect(self._generate)
         self.btn_close = QPushButton("Close")
         self.btn_close.clicked.connect(self.reject)
+        actions.addWidget(self.btn_chapters)
         actions.addWidget(self.btn_generate)
         actions.addWidget(self.btn_close)
         root.addLayout(actions)
 
         self._populate_voices()
         self._build_tiles()
+        self._build_chapter_list()
         # Preselect the current page for convenience.
         cur = viewer.current_page_index()
         if 0 <= cur < len(self._tiles):
             self._tiles[cur].set_checked(True)
         self._update_selection_count()
+        self._update_chapter_count()
+        if not self._chapter_items:
+            self.btn_chapters.setToolTip("This PDF has no table of contents to split by.")
         # Render previews lazily after the dialog is shown.
         QTimer.singleShot(0, self._render_previews)
 
@@ -3422,6 +3703,93 @@ class AudiobookDialog(QDialog):
             tile.toggled.connect(self._update_selection_count)
             self._tiles.append(tile)
             self.grid.addWidget(tile, i // cols, i % cols)
+
+    def _build_chapter_list(self):
+        """Show TOC-derived chapter ranges and let the user choose which
+        chapter files to create. Numbered chapters are selected by default;
+        front/back matter such as Welcome, Copyright/Preface, Glossary stays
+        visible but unchecked so books like this show 17 selected out of 20.
+        """
+        self.chapter_tree.clear()
+        self._chapter_items = []
+        chapters = self._toc_chapters()
+        if not chapters:
+            item = QTreeWidgetItem(["", "", "(No table of contents found)"])
+            item.setDisabled(True)
+            self.chapter_tree.addTopLevelItem(item)
+            self.chapter_tree.setEnabled(False)
+            return
+        self.chapter_tree.setEnabled(True)
+        for title, start, end in chapters:
+            pages = f"{start + 1}-{end + 1}" if start != end else f"{start + 1}"
+            item = QTreeWidgetItem(["", pages, title])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = self._is_default_chapter(title)
+            item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setData(0, Qt.ItemDataRole.UserRole, (title, start, end))
+            self.chapter_tree.addTopLevelItem(item)
+            self._chapter_items.append(item)
+        self.chapter_tree.resizeColumnToContents(0)
+        self.chapter_tree.resizeColumnToContents(1)
+
+    @staticmethod
+    def _is_default_chapter(title: str) -> bool:
+        """Default checked chapters are numbered chapter headings, e.g.
+        '1: Introduction...' through '17: Leadership...'."""
+        return bool(re.match(r"^\s*\d+\s*[:.\-]", title or ""))
+
+    def _selected_chapters(self) -> List[Tuple[str, int, int]]:
+        selected: List[Tuple[str, int, int]] = []
+        for item in self._chapter_items:
+            if item.checkState(0) != Qt.CheckState.Checked:
+                continue
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data:
+                selected.append(data)
+        return selected
+
+    def _set_all_chapters(self, checked: bool):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.chapter_tree.blockSignals(True)
+        try:
+            for item in self._chapter_items:
+                item.setCheckState(0, state)
+        finally:
+            self.chapter_tree.blockSignals(False)
+        self._update_chapter_count()
+
+    def _select_numbered_chapters(self):
+        self.chapter_tree.blockSignals(True)
+        try:
+            for item in self._chapter_items:
+                data = item.data(0, Qt.ItemDataRole.UserRole)
+                title = data[0] if data else ""
+                item.setCheckState(
+                    0,
+                    Qt.CheckState.Checked if self._is_default_chapter(title)
+                    else Qt.CheckState.Unchecked,
+                )
+        finally:
+            self.chapter_tree.blockSignals(False)
+        self._update_chapter_count()
+
+    def _update_chapter_count(self):
+        total = len(self._chapter_items)
+        selected = len(self._selected_chapters())
+        if total == 0:
+            self.chapter_lbl.setText("Chapters for whole-book split: no TOC found")
+            self.btn_chapters.setEnabled(False)
+            self.btn_chapters.setText("Whole Book by Chapters...")
+            for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
+                b.setEnabled(False)
+            return
+        for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
+            b.setEnabled(True)
+        self.chapter_lbl.setText(
+            f"Chapters for whole-book split: {selected} selected / {total} found"
+        )
+        self.btn_chapters.setEnabled(selected > 0 and self._thread is None)
+        self.btn_chapters.setText(f"Whole Book by Chapters ({selected})...")
 
     def _render_previews(self):
         """Render each page to a small pixmap for its tile. Runs on the GUI
@@ -3513,6 +3881,34 @@ class AudiobookDialog(QDialog):
         except Exception:
             return ""
 
+    # ------------------------------------------------------------------
+    def _toc_chapters(self) -> List[Tuple[str, int, int]]:
+        """Return the book's chapters from level-1 TOC entries as
+        [(title, start_page_idx, end_page_idx_inclusive), ...] (0-based)."""
+        try:
+            toc = self.doc.get_toc(simple=True)
+        except Exception:
+            toc = []
+        # Keep only top-level entries.
+        tops = [(t[1], t[2] - 1) for t in toc if t[0] == 1 and t[2] >= 1]
+        if not tops:
+            return []
+        n = self.doc.page_count
+        chapters: List[Tuple[str, int, int]] = []
+        for i, (title, start) in enumerate(tops):
+            start = max(0, min(start, n - 1))
+            # End is the page just before the next chapter starts.
+            if i + 1 < len(tops):
+                end = max(start, tops[i + 1][1] - 1)
+            else:
+                end = n - 1
+            end = min(end, n - 1)
+            chapters.append((title, start, end))
+        return chapters
+
+    def has_toc(self) -> bool:
+        return len(self._toc_chapters()) > 0
+
     def _generate(self):
         if not edge_tts_available():
             QMessageBox.critical(
@@ -3591,8 +3987,106 @@ class AudiobookDialog(QDialog):
         self._set_busy(True)
         self._thread.start()
 
+    def _generate_chapters(self):
+        if not edge_tts_available():
+            QMessageBox.critical(
+                self, "edge-tts not installed",
+                "This feature uses Microsoft neural voices via the 'edge-tts' "
+                "package, which isn't installed.\n\nInstall it with:\n"
+                "    pip install edge-tts\n\nThen reopen this dialog."
+            )
+            return
+        chapters = self._selected_chapters()
+        if not chapters:
+            QMessageBox.information(
+                self, APP_NAME,
+                "Select at least one chapter to create."
+            )
+            return
+
+        # Gather text for the whole book in parallel, then slice per chapter.
+        n = self.doc.page_count
+        page_text: Dict[int, str] = {}
+        if self.viewer.doc_path:
+            def _native(page, idx):
+                try:
+                    return page.get_text("text")
+                except Exception:
+                    return ""
+            page_text = parallel_pages(self.viewer.doc_path, range(n), _native)
+
+        def text_for_page(i: int) -> str:
+            t = (page_text.get(i) or "").strip()
+            if not t:
+                t = self._page_text(i).strip()
+            return t
+
+        chapter_data: List[Tuple[str, str]] = []
+        any_text = False
+        for title, start, end in chapters:
+            parts = [text_for_page(p) for p in range(start, end + 1)]
+            body = "\n".join(p for p in parts if p).strip()
+            if body:
+                any_text = True
+            # Read the chapter title aloud first, then its content.
+            full = f"{title}.\n\n{body}" if body else title
+            chapter_data.append((title, full))
+
+        if not any_text:
+            QMessageBox.warning(
+                self, "No text found",
+                "The book's pages don't have extractable text.\n\n"
+                "If this is a scanned PDF, enable 'Auto-OCR Scanned Pages' in "
+                "the Tools menu, let it finish, then try again."
+            )
+            return
+
+        fmt = self.format_combo.currentData()
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Choose a folder for the chapter audio files"
+        )
+        if not out_dir:
+            return
+        # Put the files in a dedicated sub-folder named after the book.
+        book = "audiobook"
+        if self.viewer.doc_path:
+            book = os.path.splitext(os.path.basename(self.viewer.doc_path))[0]
+        target_dir = os.path.join(out_dir, _safe_filename(book) + " - Audiobook")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Cannot create folder", str(e))
+            return
+
+        voice = self.voice_combo.currentData()
+        self.settings.setValue("audiobook_voice", voice)
+        rate_pct = self.speed_combo.currentData()
+
+        self._thread = QThread(self)
+        # out_path only carries the extension hint (.mp3/.wav) for the worker.
+        self._worker = AudiobookWorker(
+            [], voice, rate_pct, out_path=f"x.{fmt}",
+            chapters=chapter_data, out_dir=target_dir,
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+
+        self.progress.setLabelText("Starting…")
+        self.progress.setRange(0, len(chapter_data))
+        self.progress.setValue(0)
+        self.progress.show()
+        self._set_busy(True)
+        self._thread.start()
+
     def _set_busy(self, busy: bool):
         self.btn_generate.setEnabled(not busy)
+        self.btn_chapters.setEnabled(not busy and len(self._selected_chapters()) > 0)
+        self.chapter_tree.setEnabled(not busy and bool(self._chapter_items))
+        for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
+            b.setEnabled(not busy and bool(self._chapter_items))
         self.btn_all.setEnabled(not busy)
         self.btn_none.setEnabled(not busy)
         self.btn_range.setEnabled(not busy)
@@ -3610,9 +4104,11 @@ class AudiobookDialog(QDialog):
         self.progress.reset()
         self._set_busy(False)
         self.status_lbl.setText(f"Saved: {path}")
+        is_dir = os.path.isdir(path)
+        what = "chapter files were saved to folder" if is_dir else "audiobook was saved to"
         ret = QMessageBox.information(
             self, "Audiobook created",
-            f"Your audiobook was saved to:\n{path}",
+            f"Your {what}:\n{path}",
             QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
         )
         if ret == QMessageBox.StandardButton.Open:
@@ -3765,8 +4261,8 @@ class StartScreen(QWidget):
 
     # ------------------------------------------------------------------
     def refresh(self, recent_files: List[str]):
-        """Rebuild the recent-files list from the supplied list (max 10)."""
-        self._recent = recent_files[:MAX_RECENT]
+        """Rebuild the recent-files list from the supplied list (newest 5)."""
+        self._recent = recent_files[:START_RECENT]
 
         # Clear old rows
         while self._list.count():
@@ -4063,6 +4559,18 @@ class MainWindow(QMainWindow):
 
         # Show start screen on cold start (no CLI arg yet)
         self._show_start_screen()
+        self._toolbar_refit_done = False
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # Re-measure toolbar buttons now that the window is visible and the
+        # global stylesheet + real display DPI are in effect. Doing it here
+        # (rather than during __init__, before the QSS is applied) guarantees
+        # the labels are sized correctly and never clip. Run once, deferred so
+        # layout has settled.
+        if not getattr(self, "_toolbar_refit_done", False):
+            self._toolbar_refit_done = True
+            QTimer.singleShot(0, self._refit_toolbar_buttons)
 
     # ------------------------------------------------------------------
     # Stack helpers
@@ -4086,9 +4594,16 @@ class MainWindow(QMainWindow):
         ):
             if dock is not None:
                 dock.setVisible(visible)
-        # Toolbar is the QToolBar we added in _build_toolbar; find it by name.
-        for tb in self.findChildren(QToolBar):
-            tb.setVisible(visible)
+        # Toolbar (QToolBar host) built in _build_toolbar - hide the whole bar
+        # so its background strip doesn't linger on the welcome screen.
+        tbar = getattr(self, "_main_toolbar", None)
+        if tbar is not None:
+            tbar.setVisible(visible)
+        strip = getattr(self, "_toolbar_strip", None)
+        if strip is not None:
+            strip.setVisible(visible)
+        # NOTE: the top menu bar (File / Edit / View / ...) stays visible on the
+        # start screen so its actions remain reachable.
 
     @property
     def viewer(self) -> Optional[PdfViewer]:
@@ -4259,10 +4774,46 @@ class MainWindow(QMainWindow):
         return a
 
     def _build_toolbar(self):
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        tb.setIconSize(QSize(20, 20))
-        self.addToolBar(tb)
+        # Top-docked QToolBar (so it spans the FULL window width, ABOVE the
+        # dock panels / thumbnail preview bar) that hosts a single container
+        # using a wrapping FlowLayout. Every control is always visible - when
+        # the window is too narrow the buttons wrap onto more rows instead of
+        # hiding behind a ">>" overflow menu.
+        qtb = QToolBar("Main")
+        qtb.setObjectName("mainToolBar")
+        qtb.setMovable(False)
+        qtb.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, qtb)
+        self._main_toolbar = qtb
+
+        strip = _FlowStrip()
+        strip.setObjectName("toolbarStrip")
+        flow = FlowLayout(strip, margin=6, hspacing=6, vspacing=6)
+        strip.setLayout(flow)
+        qtb.addWidget(strip)
+        self._toolbar_strip = strip
+
+        # Every push-button we create on the toolbar, so we can re-fit their
+        # widths after the stylesheet/DPI are known (see _refit_toolbar_buttons).
+        self._toolbar_buttons: List[QPushButton] = []
+        self._toolbar_flow = flow
+
+        # Shim so the existing "tb.addWidget / tb.addSeparator" calls below add
+        # into the FlowLayout.
+        class _TB:
+            def __init__(self, flow):
+                self._flow = flow
+
+            def addWidget(self, w):
+                self._flow.addWidget(w)
+
+            def addSeparator(self):
+                sep = QWidget()
+                sep.setFixedSize(1, 26)
+                sep.setStyleSheet("background: rgba(128,128,128,0.35);")
+                self._flow.addWidget(sep)
+
+        tb = _TB(flow)
 
         tb.addWidget(self._tb_btn("Open", self.action_open))
         tb.addWidget(self._tb_btn("+ Tab", self._new_tab, tip="Open a new tab (Ctrl+T)"))
@@ -4311,11 +4862,10 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._tb_btn("↑", lambda: self.viewer and self.viewer.prev_hit(), tip="Previous match (Shift+F3)"))
         tb.addWidget(self._tb_btn("↓", lambda: self.viewer and self.viewer.next_hit(), tip="Next match (F3)"))
         self.search_count_lbl = QLabel("")
+        self.search_count_lbl.setStyleSheet("background: transparent; border: none;")
         tb.addWidget(self.search_count_lbl)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb.addWidget(spacer)
+        tb.addSeparator()
 
         # Read aloud (TTS) controls
         self.btn_tts_play = self._tb_btn(
@@ -4335,6 +4885,7 @@ class MainWindow(QMainWindow):
         # Build the menu lazily on first click so we don't init pyttsx3 unless needed.
         self._tts_menu.aboutToShow.connect(self._build_tts_menu)
         self._fit_button_width(self.btn_tts_settings)
+        self._toolbar_buttons.append(self.btn_tts_settings)
         tb.addWidget(self.btn_tts_settings)
         # Audiobook export (natural neural voice via edge-tts)
         self.btn_audiobook = self._tb_btn(
@@ -4355,6 +4906,7 @@ class MainWindow(QMainWindow):
         ocr_menu.addAction("Set OCR Language...", self.action_set_ocr_language)
         self.btn_ocr.setMenu(ocr_menu)
         self._fit_button_width(self.btn_ocr)
+        self._toolbar_buttons.append(self.btn_ocr)
         tb.addWidget(self.btn_ocr)
 
         # Color mode toggle
@@ -4364,28 +4916,34 @@ class MainWindow(QMainWindow):
         self.btn_dark.setToolTip("Toggle Dark Mode (Ctrl+D)")
         self.btn_dark.clicked.connect(lambda checked: self._apply_color_mode("dark" if checked else "light"))
         self._fit_button_width(self.btn_dark)
+        self._toolbar_buttons.append(self.btn_dark)
         tb.addWidget(self.btn_dark)
 
     @staticmethod
     def _fit_button_width(b: QPushButton, extra: int = 0):
-        """Ensure a button is at least wide enough for its text (+ optional
-        menu arrow) so the label never clips, and stop the toolbar from
-        squeezing it narrower than that. Uses font metrics so it scales with
-        the active font / display DPI."""
+        """Ensure a toolbar button never clips its label.
+
+        We make the button's MINIMUM size equal to its natural size hint
+        (which the Qt style computes from the text + QSS padding at the real
+        display DPI) plus a safety margin, and lock its size policy so the
+        toolbar can't squeeze it. ``ensurePolished`` forces the stylesheet /
+        font to be applied first so the metrics are accurate on HiDPI screens.
+        """
+        b.ensurePolished()
+        # Natural width Qt wants for this button (text + QSS padding + arrow).
+        hint = b.sizeHint().width()
+        # Also compute a font-metric floor as a backstop.
         fm = b.fontMetrics()
-        # boundingRect handles wide glyphs/emoji better than horizontalAdvance.
-        text_w = fm.boundingRect(b.text()).width()
-        # QSS padding is 6px 12px (=24px) + 2px border + safety margin.
-        pad = 34 + extra
-        if b.menu() is not None:
-            pad += 20  # dropdown arrow needs room
-        need = text_w + pad
+        text_w = fm.horizontalAdvance(b.text())
+        floor = text_w + 28 + extra + (22 if b.menu() is not None else 0)
+        need = max(hint, floor) + 8   # small safety pad so glyphs never touch edges
         b.setMinimumWidth(need)
-        # Prevent the toolbar layout from shrinking the button below its text;
-        # excess items go to the toolbar's ">>" overflow menu instead of
-        # clipping the label.
+        b.setMinimumHeight(max(b.sizeHint().height(), 28))
+        # Fixed horizontal policy: the button keeps exactly `need` px and the
+        # toolbar overflow menu (">>") absorbs anything that doesn't fit,
+        # instead of clipping the text.
         pol = b.sizePolicy()
-        pol.setHorizontalPolicy(QSizePolicy.Policy.Minimum)
+        pol.setHorizontalPolicy(QSizePolicy.Policy.Fixed)
         b.setSizePolicy(pol)
 
     def _tb_btn(self, text: str, slot, tip: str = "") -> QPushButton:
@@ -4394,7 +4952,22 @@ class MainWindow(QMainWindow):
             b.setToolTip(tip)
         b.clicked.connect(slot)
         self._fit_button_width(b)
+        self._toolbar_buttons.append(b)
         return b
+
+    def _refit_toolbar_buttons(self):
+        """Re-measure every toolbar button once the stylesheet and real screen
+        DPI are known. Called after the window is shown, so font metrics /
+        QSS padding are accurate and labels never clip."""
+        for b in getattr(self, "_toolbar_buttons", []):
+            try:
+                b.setMinimumWidth(0)      # reset so sizeHint reflects content
+                b.style().unpolish(b)
+                b.style().polish(b)
+                self._fit_button_width(b)
+            except Exception:
+                pass
+
 
     def _build_statusbar(self):
         self.status: QStatusBar = self.statusBar()
@@ -4967,7 +5540,13 @@ class MainWindow(QMainWindow):
         # Update the tab label
         self.tabs.set_tab_title(v, fname)
         self.thumb_panel.populate_placeholders(doc.page_count)
-        self.outline_panel.populate(doc)
+        has_outline = self.outline_panel.populate(doc)
+        # Default the sidebar to the Outline tab when the PDF has a table of
+        # contents; otherwise show the Thumbnails (page preview) tab.
+        if has_outline:
+            self.outline_dock.raise_()
+        else:
+            self.thumb_dock.raise_()
         self.page_total_lbl.setText(f" / {doc.page_count} ")
         self.page_input.setText("1")
         # Load bookmarks for this file

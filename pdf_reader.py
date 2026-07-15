@@ -64,7 +64,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
+    QFont,
     QGuiApplication,
     QIcon,
     QImage,
@@ -75,6 +77,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -85,6 +88,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLayout,
@@ -96,6 +100,7 @@ from PyQt6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -261,7 +266,10 @@ def _resource_path(name: str) -> str:
 
 MAX_RECENT = 10
 START_RECENT = 5               # recent files shown on the start screen (newest)
-RENDER_CACHE_MAX = 60          # cached rendered pages
+RENDER_CACHE_MAX = 120         # cached rendered pages (bitmaps are modest in
+                               # size; a larger cache avoids thrashing in
+                               # two-page mode and when toggling dark/light,
+                               # where visible+prefetch+dpr key variants add up)
 THUMB_CACHE_MAX = 1000         # plenty of thumbs
 PREFETCH_BEFORE = 1            # pages to render before viewport
 PREFETCH_AFTER = 2             # pages to render after viewport
@@ -964,6 +972,9 @@ class PdfPageWidget(QWidget):
         self.page_h_pt = page_h_pt
 
         self.pixmap_image: Optional[QPixmap] = None
+        # Previous render kept while a new one is pending, drawn scaled so
+        # zooming shows a preview instead of a blank page.
+        self._stale_pixmap: Optional[QPixmap] = None
         self.zoom: float = 1.0
         self.rotation: int = 0
         # "light" | "dark" | "sepia" - controls the placeholder colour drawn
@@ -989,6 +1000,7 @@ class PdfPageWidget(QWidget):
 
     # ------------------------------------------------------------------
     def update_geometry(self, zoom: float, rotation: int):
+        old_rotation = self.rotation
         self.zoom = zoom
         self.rotation = rotation
         if rotation in (90, 270):
@@ -996,13 +1008,21 @@ class PdfPageWidget(QWidget):
         else:
             w, h = self.page_w_pt, self.page_h_pt
         self.setFixedSize(int(w * zoom) + 12, int(h * zoom) + 12)
-        # When geometry changes, the cached pixmap (if any) might be wrong size.
+        # The cached pixmap is now the wrong size, but instead of blanking the
+        # page (which flashes an empty placeholder while zooming) we keep it as a
+        # "stale" bitmap that paintEvent scales to fill the page until the fresh
+        # render arrives. Rotation changes make scaling meaningless, so drop it.
+        if self.pixmap_image is not None and old_rotation == rotation:
+            self._stale_pixmap = self.pixmap_image
+        else:
+            self._stale_pixmap = None
         self.pixmap_image = None
         self._selection_rect = None
         self.update()
 
     def set_pixmap(self, pix: QPixmap):
         self.pixmap_image = pix
+        self._stale_pixmap = None
         self.update()
 
     def set_search_hits(self, hits: List[fitz.Rect], current_local_idx: int = -1):
@@ -1092,6 +1112,18 @@ class PdfPageWidget(QWidget):
                     log_w, log_h,
                     self.tint_color,
                 )
+                p.restore()
+        elif self._stale_pixmap is not None:
+            # A re-render is pending (e.g. mid-zoom). Draw the previous bitmap
+            # scaled to the new page size so the user sees a smooth preview
+            # instead of a blank flash. Slightly soft until the crisp render
+            # lands, then set_pixmap() replaces it.
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            p.drawPixmap(page_rect, self._stale_pixmap, self._stale_pixmap.rect())
+            if self.tint_color is not None:
+                p.save()
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                p.fillRect(page_rect, self.tint_color)
                 p.restore()
         else:
             # Loading placeholder - colours match the active color mode so the
@@ -1210,6 +1242,7 @@ class PdfViewer(QScrollArea):
         # Search
         self.search_hits: List[SearchHit] = []
         self.current_hit_idx: int = -1
+        self._hits_by_page: Dict[int, List[SearchHit]] = {}
 
         # Debounce timers
         self._refresh_timer = QTimer(self)
@@ -1291,10 +1324,21 @@ class PdfViewer(QScrollArea):
             w.setParent(None)
             w.deleteLater()
         self.page_widgets = []
+        self._widget_map = {}
         self.search_hits = []
         self.current_hit_idx = -1
+        self._hits_by_page = {}
         self.cache.clear()
         self.thumb_cache.clear()
+        # Drop per-document OCR word boxes so they don't leak / go stale when a
+        # different PDF is opened in this same viewer.
+        self._ocr_words_cache.clear()
+        # Drop the read-aloud sentence cache for the old document too.
+        if hasattr(self, "_tts") and self._tts is not None:
+            try:
+                self._tts.clear_cache()
+            except Exception:
+                pass
         self.single_page_index = 0
         if emit:
             self.documentClosed.emit()
@@ -1311,6 +1355,7 @@ class PdfViewer(QScrollArea):
             if item.widget():
                 item.widget().deleteLater()
         self.page_widgets = []
+        self._widget_map = {}
 
         # PERFORMANCE: PyMuPDF's load_page(i).rect is expensive for large/complex
         # PDFs (it parses the full page object). Calling it for every page on the
@@ -1508,11 +1553,19 @@ class PdfViewer(QScrollArea):
         # Not cached yet - request render
         self.worker.submit(key, priority=priority, is_thumb=False)
 
+    def _rebuild_widget_map(self):
+        """(Re)build the page_index -> widget lookup. Call after page_widgets is
+        replaced (open/close/chunked build)."""
+        self._widget_map = {w.page_index: w for w in self.page_widgets}
+
     def _widget_for_page(self, page_index: int) -> Optional[PdfPageWidget]:
-        for w in self.page_widgets:
-            if w.page_index == page_index:
-                return w
-        return None
+        # O(1) lookup via a page_index -> widget map, replacing an O(n) linear
+        # scan that was called in per-page loops (making refreshes O(n^2)).
+        cache = getattr(self, "_widget_map", None)
+        if cache is None or len(cache) != len(self.page_widgets):
+            self._rebuild_widget_map()
+            cache = self._widget_map
+        return cache.get(page_index)
 
     def _on_page_rendered(self, key: RenderKey, img: QImage, is_thumb: bool):
         if is_thumb:
@@ -1544,14 +1597,20 @@ class PdfViewer(QScrollArea):
         viewport_top = self.verticalScrollBar().value()
         viewport_bot = viewport_top + self.viewport().height()
         result: List[int] = []
+        # page_widgets are laid out top-to-bottom, so once a widget starts below
+        # the viewport bottom we can stop scanning (avoids an O(n) walk of every
+        # page on a large document for each scroll tick). mapTo() is the costly
+        # call, so short-circuiting it matters.
         for w in self.page_widgets:
             if not w.isVisible():
                 continue
-            # Map widget Y in container coords
             top = w.mapTo(self._container, QPoint(0, 0)).y()
             bot = top + w.height()
-            if bot >= viewport_top and top <= viewport_bot:
-                result.append(w.page_index)
+            if bot < viewport_top:
+                continue                      # entirely above viewport
+            if top > viewport_bot:
+                break                         # this and all following are below
+            result.append(w.page_index)
         return result
 
     def _on_scroll(self, _val):
@@ -1730,9 +1789,13 @@ class PdfViewer(QScrollArea):
 
         # If the underlying bitmap has changed (light <-> dark), rebuild visible.
         if prev_render_mode != new_render_mode:
+            dpr = self._device_pixel_ratio()
             for w in self.page_widgets:
-                # Try cache; if miss, force a re-render request below.
-                key = RenderKey.make(w.page_index, self.zoom, self.rotation, new_render_mode)
+                # Try cache; if miss, force a re-render request below. Must use
+                # the real device pixel ratio or the lookup always misses on
+                # HiDPI displays (where every other path bakes dpr into the key).
+                key = RenderKey.make(w.page_index, self.zoom, self.rotation,
+                                     new_render_mode, dpr)
                 cached = self.cache.get(key)
                 if cached is not None:
                     w.set_pixmap(cached)
@@ -1762,6 +1825,7 @@ class PdfViewer(QScrollArea):
     def search(self, query: str) -> int:
         self.search_hits = []
         self.current_hit_idx = -1
+        self._hits_by_page = {}
         for w in self.page_widgets:
             w.set_search_hits([], -1)
         if self.doc is None or not query:
@@ -1795,41 +1859,62 @@ class PdfViewer(QScrollArea):
                 for r in rects:
                     self.search_hits.append(SearchHit(page_index=i, rect=r))
 
+        # Index hits by page once, so highlight application is O(hits-on-page)
+        # instead of re-scanning the whole hit list for every widget (which made
+        # next/prev O(pages * hits)).
+        by_page: Dict[int, List[SearchHit]] = {}
+        for h in self.search_hits:
+            by_page.setdefault(h.page_index, []).append(h)
+        self._hits_by_page = by_page
+
         if self.search_hits:
             self.current_hit_idx = 0
             self._scroll_to_hit(self.search_hits[0])
+        # Only highlight the widgets that are currently on screen; the rest get
+        # highlighted lazily as they render/scroll into view. Avoids an O(pages)
+        # loop on every search.
+        visible = set(self._visible_indices())
         for w in self.page_widgets:
-            self._apply_search_highlight_to_widget(w)
+            if w.page_index in visible:
+                self._apply_search_highlight_to_widget(w)
         return len(self.search_hits)
 
     def _apply_search_highlight_to_widget(self, w: PdfPageWidget):
-        hits = [h.rect for h in self.search_hits if h.page_index == w.page_index]
+        local = getattr(self, "_hits_by_page", {}).get(w.page_index, [])
+        hits = [h.rect for h in local]
         cur = -1
         if 0 <= self.current_hit_idx < len(self.search_hits):
             cur_hit = self.search_hits[self.current_hit_idx]
             if cur_hit.page_index == w.page_index:
-                local = [h for h in self.search_hits if h.page_index == w.page_index]
                 for li, h in enumerate(local):
                     if h.rect == cur_hit.rect:
                         cur = li
                         break
         w.set_search_hits(hits, cur)
 
-    def next_hit(self):
+    def _move_hit(self, delta: int):
         if not self.search_hits:
             return
-        self.current_hit_idx = (self.current_hit_idx + 1) % len(self.search_hits)
-        self._scroll_to_hit(self.search_hits[self.current_hit_idx])
-        for w in self.page_widgets:
-            self._apply_search_highlight_to_widget(w)
+        old_page = -1
+        if 0 <= self.current_hit_idx < len(self.search_hits):
+            old_page = self.search_hits[self.current_hit_idx].page_index
+        self.current_hit_idx = (self.current_hit_idx + delta) % len(self.search_hits)
+        new_hit = self.search_hits[self.current_hit_idx]
+        self._scroll_to_hit(new_hit)
+        # Only the page losing the "current" marker and the page gaining it need
+        # re-highlighting — not every widget (which was O(pages * hits)).
+        for pidx in {old_page, new_hit.page_index}:
+            if pidx < 0:
+                continue
+            w = self._widget_for_page(pidx)
+            if w is not None:
+                self._apply_search_highlight_to_widget(w)
+
+    def next_hit(self):
+        self._move_hit(+1)
 
     def prev_hit(self):
-        if not self.search_hits:
-            return
-        self.current_hit_idx = (self.current_hit_idx - 1) % len(self.search_hits)
-        self._scroll_to_hit(self.search_hits[self.current_hit_idx])
-        for w in self.page_widgets:
-            self._apply_search_highlight_to_widget(w)
+        self._move_hit(-1)
 
     def _scroll_to_hit(self, hit: SearchHit):
         widget = self._widget_for_page(hit.page_index)
@@ -2041,7 +2126,10 @@ class PdfViewer(QScrollArea):
     # ------------------------------------------------------------------
     def get_page_words(self, page_index: int) -> List["OcrWord"]:
         """Best-effort word extraction: native PDF text first, OCR cache
-        second. Returns [] only for pages that have neither."""
+        second. Returns [] only for pages that have neither.
+
+        MUST be called on the GUI thread — it touches self.doc directly. For
+        background threads use get_page_words_threadsafe()."""
         if self.doc is None:
             return []
         try:
@@ -2054,6 +2142,35 @@ class PdfViewer(QScrollArea):
         cached = self._ocr_words_cache.get(page_index)
         if cached:
             return cached
+        return []
+
+    def get_page_words_threadsafe(self, page_index: int) -> List["OcrWord"]:
+        """Thread-safe word extraction for background workers.
+
+        PyMuPDF is NOT safe for concurrent access to a single Document, so this
+        opens its OWN short-lived fitz handle by path (never touching self.doc)
+        exactly like parallel_pages does. Falls back to the OCR-words cache
+        (a plain dict read, safe under CPython) for image-only pages."""
+        path = self.doc_path
+        if path:
+            local_doc = None
+            try:
+                local_doc = fitz.open(path)
+                page = local_doc.load_page(page_index)
+                words = _extract_page_words(page)
+                if words:
+                    return words
+            except Exception:
+                pass
+            finally:
+                if local_doc is not None:
+                    try:
+                        local_doc.close()
+                    except Exception:
+                        pass
+        cached = self._ocr_words_cache.get(page_index)
+        if cached:
+            return list(cached)
         return []
 
     def get_auto_ocr(self) -> "AutoOcrController":
@@ -3008,10 +3125,30 @@ class ReadAloudController(QObject):
         # thread (SAPI/COM has thread-affinity quirks).
         return _list_tts_voices()
 
+    def clear_cache(self):
+        """Drop cached extracted sentences (called when the document changes)."""
+        self.stop()
+        self._page_cache.clear()
+        self._sentences = []
+        self._page_index = -1
+        self._cursor = 0
+
     def shutdown(self):
         self.stop()
+        # speak() blocks the worker's event loop inside engine.runAndWait();
+        # request_stop() interrupts that so quit() can actually return. Then
+        # wait long enough (with a fallback terminate) that we never delete the
+        # QThread while the worker is still executing inside it.
+        try:
+            self._worker.request_stop()
+        except Exception:
+            pass
         self._thread.quit()
-        self._thread.wait(1500)
+        if not self._thread.wait(3000):
+            # Worker still stuck (e.g. driver hung mid-utterance): force it down
+            # rather than tearing down a live QThread underneath it.
+            self._thread.terminate()
+            self._thread.wait(1000)
 
     # ------------------------------------------------------------------
     def _set_state(self, new_state: str):
@@ -3043,7 +3180,9 @@ class ReadAloudController(QObject):
         # worker thread so the GUI stays responsive.
         def do_extract():
             try:
-                words = self.viewer.get_page_words(page_idx)
+                # Thread-safe: opens its own fitz handle by path rather than
+                # touching the viewer's shared self.doc from a worker thread.
+                words = self.viewer.get_page_words_threadsafe(page_idx)
                 sentences = _group_words_into_sentences(words)
             except Exception:
                 sentences = []
@@ -3263,6 +3402,7 @@ class AudiobookWorker(QObject):
     """
 
     progress = pyqtSignal(int, int, str)   # done, total, human status
+    log = pyqtSignal(str)                  # detailed log line for the activity view
     finished = pyqtSignal(str)             # output file path (or folder)
     failed = pyqtSignal(str)               # error message
 
@@ -3287,6 +3427,19 @@ class AudiobookWorker(QObject):
     def cancel(self):
         self._cancel.set()
 
+    def _emit_log(self, msg: str):
+        """Emit a timestamped log line to the activity view."""
+        import time
+        self.log.emit(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    @staticmethod
+    def _fmt_size(n: float) -> str:
+        if n < 1024:
+            return f"{n:.0f} B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.1f} KB"
+        return f"{n / (1024 * 1024):.1f} MB"
+
     @pyqtSlot()
     def run(self):
         try:
@@ -3297,28 +3450,46 @@ class AudiobookWorker(QObject):
                 "Install it with:\n    pip install edge-tts"
             )
             return
+        self._emit_log(f"Voice: {self._voice}   Speed: {self._rate_str()}")
         if self._chapters is not None:
+            self._emit_log(f"Mode: whole book by chapters ({len(self._chapters)} chapter(s))")
+            self._emit_log(f"Output folder: {self._out_dir}")
             self._run_chapters()
         else:
+            self._emit_log(f"Mode: single file ({len(self._chunks)} page(s))")
+            self._emit_log(f"Output file: {self._out_path}")
             self._run_single()
 
     # ------------------------------------------------------------------
     def _rate_str(self) -> str:
         return f"{'+' if self._rate_pct >= 0 else ''}{self._rate_pct}%"
 
-    async def _synth_text_to_file(self, text: str, mp3_path: str):
+    async def _synth_text_to_file(self, text: str, mp3_path: str, label: str = ""):
         """Synthesize one blob of text into a single MP3 file."""
+        import time
         import edge_tts  # type: ignore
         with open(mp3_path, "wb") as out:
             text = (text or "").strip()
             if not text:
                 return
             communicate = edge_tts.Communicate(text, self._voice, rate=self._rate_str())
+            written = 0
+            last_report = 0.0
             async for chunk in communicate.stream():
                 if self._cancel.is_set():
                     raise RuntimeError("cancelled")
                 if chunk.get("type") == "audio":
-                    out.write(chunk["data"])
+                    data = chunk["data"]
+                    out.write(data)
+                    written += len(data)
+                    # Throttle byte-progress logs to ~2/sec so the view stays readable.
+                    now = time.monotonic()
+                    if now - last_report >= 0.5:
+                        last_report = now
+                        pre = f"{label}: " if label else ""
+                        self._emit_log(f"  {pre}received {self._fmt_size(written)}…")
+            pre = f"{label} " if label else ""
+            self._emit_log(f"  {pre}audio complete ({self._fmt_size(written)})")
 
     # ------------------------------------------------------------------
     def _run_single(self):
@@ -3337,13 +3508,23 @@ class AudiobookWorker(QObject):
                     self.progress.emit(i, total, f"Synthesizing page {i + 1} of {total}…")
                     text = (text or "").strip()
                     if not text:
+                        self._emit_log(f"Page {i + 1}/{total}: (no text, skipped)")
                         continue
+                    self._emit_log(
+                        f"Page {i + 1}/{total}: synthesizing {len(text):,} characters…"
+                    )
                     communicate = edge_tts.Communicate(text, self._voice, rate=rate_str)
+                    written = 0
                     async for chunk in communicate.stream():
                         if self._cancel.is_set():
                             raise RuntimeError("cancelled")
                         if chunk.get("type") == "audio":
-                            out.write(chunk["data"])
+                            data = chunk["data"]
+                            out.write(data)
+                            written += len(data)
+                    self._emit_log(
+                        f"  page {i + 1} done ({self._fmt_size(written)})"
+                    )
 
         loop = asyncio.new_event_loop()
         tmp_mp3 = None
@@ -3365,6 +3546,7 @@ class AudiobookWorker(QObject):
 
             if want_wav:
                 self.progress.emit(total, total, "Converting to WAV…")
+                self._emit_log("Converting MP3 to WAV via ffmpeg…")
                 if not self._convert_mp3_to_wav(tmp_mp3, self._out_path):
                     self.failed.emit(
                         "Generated MP3 but could not convert to WAV.\n"
@@ -3372,8 +3554,15 @@ class AudiobookWorker(QObject):
                         "if you choose MP3 output instead."
                     )
                     return
+                self._emit_log("WAV conversion complete.")
 
+            try:
+                final_sz = os.path.getsize(self._out_path)
+                self._emit_log(f"Saved: {self._out_path} ({self._fmt_size(final_sz)})")
+            except Exception:
+                self._emit_log(f"Saved: {self._out_path}")
             self.progress.emit(total, total, "Done.")
+            self._emit_log("All done.")
             self.finished.emit(self._out_path)
         except RuntimeError as e:
             if str(e) == "cancelled":
@@ -3415,21 +3604,30 @@ class AudiobookWorker(QObject):
                 safe = _safe_filename(title) or f"Chapter {i + 1}"
                 base = f"{i + 1:02d} - {safe}"
                 self.progress.emit(i, total, f"Chapter {i + 1} of {total}: {title[:40]}")
+                self._emit_log(
+                    f"Chapter {i + 1}/{total}: \"{title}\" "
+                    f"({len((text or '').strip()):,} characters)"
+                )
                 if not (text or "").strip():
+                    self._emit_log("  (no text, skipped)")
                     continue
 
                 if want_wav:
                     fd, tmp_mp3 = tempfile.mkstemp(suffix=".mp3")
                     os.close(fd)
                     try:
-                        loop.run_until_complete(self._synth_text_to_file(text, tmp_mp3))
+                        loop.run_until_complete(
+                            self._synth_text_to_file(text, tmp_mp3, label=f"ch {i + 1}")
+                        )
                         wav_path = os.path.join(self._out_dir, base + ".wav")
+                        self._emit_log(f"  converting to WAV: {base}.wav")
                         if not self._convert_mp3_to_wav(tmp_mp3, wav_path):
                             self.failed.emit(
                                 "WAV output needs ffmpeg on PATH. Try MP3 format instead."
                             )
                             return
                         written.append(wav_path)
+                        self._emit_log(f"  saved: {base}.wav")
                     finally:
                         if os.path.isfile(tmp_mp3):
                             try:
@@ -3438,13 +3636,23 @@ class AudiobookWorker(QObject):
                                 pass
                 else:
                     mp3_path = os.path.join(self._out_dir, base + ".mp3")
-                    loop.run_until_complete(self._synth_text_to_file(text, mp3_path))
+                    loop.run_until_complete(
+                        self._synth_text_to_file(text, mp3_path, label=f"ch {i + 1}")
+                    )
                     written.append(mp3_path)
+                    try:
+                        self._emit_log(
+                            f"  saved: {base}.mp3 ({self._fmt_size(os.path.getsize(mp3_path))})"
+                        )
+                    except Exception:
+                        self._emit_log(f"  saved: {base}.mp3")
 
             if self._cancel.is_set():
                 self.failed.emit("Cancelled.")
                 return
             self.progress.emit(total, total, "Done.")
+            self._emit_log(f"All done — {len(written)} file(s) written to:")
+            self._emit_log(f"  {self._out_dir}")
             self.finished.emit(self._out_dir)
         except RuntimeError as e:
             if str(e) == "cancelled":
@@ -3529,6 +3737,134 @@ class _PageTile(QWidget):
         self.check.setChecked(on)
 
 
+class ProgressLogDialog(QDialog):
+    """A progress dialog that also shows a live, scrolling activity log so the
+    user can see exactly what's happening (per-chapter synthesis, bytes
+    received, files saved, …) instead of a bar sitting at 0%."""
+
+    canceled = pyqtSignal()
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        # Non-modal so the user can keep reading/using the app while audio
+        # generates in the background. Give the window real min/max/close
+        # buttons so it can be minimised to the taskbar.
+        self.setModal(False)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.CustomizeWindowHint
+        )
+        self.setMinimumWidth(520)
+        self._cancelled = False
+
+        root = QVBoxLayout(self)
+
+        self.status_lbl = QLabel("Starting…")
+        self.status_lbl.setWordWrap(True)
+        self.status_lbl.setStyleSheet("font-weight: 600;")
+        root.addWidget(self.status_lbl)
+
+        row = QHBoxLayout()
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setTextVisible(True)
+        row.addWidget(self.bar, 1)
+        root.addLayout(row)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(220)
+        self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        # Monospace so timestamps and byte counts line up.
+        f = QFont("Consolas")
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        f.setPointSize(9)
+        self.log_view.setFont(f)
+        root.addWidget(self.log_view, 1)
+
+        hint = QLabel(
+            "Generation runs in the background — you can keep using the app. "
+            "Minimise or click “Run in Background” to hide this window."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9aa0a6;")
+        root.addWidget(hint)
+
+        btns = QHBoxLayout()
+        self.copy_btn = QPushButton("Copy Log")
+        self.copy_btn.clicked.connect(self._copy_log)
+        btns.addWidget(self.copy_btn)
+        btns.addStretch(1)
+        self.bg_btn = QPushButton("Run in Background")
+        self.bg_btn.setToolTip("Hide this window and keep generating in the background.")
+        self.bg_btn.clicked.connect(self.showMinimized)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btns.addWidget(self.bg_btn)
+        btns.addWidget(self.cancel_btn)
+        root.addLayout(btns)
+
+    def append_log(self, line: str):
+        self.log_view.appendPlainText(line)
+        # Auto-scroll to the newest line.
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def set_status(self, text: str):
+        self.status_lbl.setText(text)
+
+    def set_progress(self, done: int, total: int):
+        if total <= 0:
+            self.bar.setRange(0, 0)          # indeterminate (busy) bar
+            return
+        self.bar.setRange(0, total)
+        self.bar.setValue(min(done, total))
+
+    def finish(self, ok: bool, message: str):
+        """Switch the dialog into its 'done' state: full bar, Close button."""
+        if ok:
+            self.set_progress(1, 1)
+            self.bar.setValue(self.bar.maximum())
+        self.set_status(message)
+        # No longer running: drop the background button, turn Cancel into Close.
+        self.bg_btn.hide()
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText("Close")
+        try:
+            self.cancel_btn.clicked.disconnect()
+        except TypeError:
+            pass
+        self.cancel_btn.clicked.connect(self.accept)
+        # Bring the window back to the foreground so the result is visible even
+        # if the user had minimised it.
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self.log_view.toPlainText())
+
+    def _on_cancel(self):
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self.set_status("Cancelling…")
+        self.cancel_btn.setEnabled(False)
+        self.canceled.emit()
+
+    def closeEvent(self, e):
+        # Closing the window mid-run behaves like Cancel.
+        if not self._cancelled and self.cancel_btn.text() == "Cancel":
+            self._on_cancel()
+        super().closeEvent(e)
+
+
 class AudiobookDialog(QDialog):
     """Dialog to select PDF pages (with previews) and export them as a
     natural-sounding audiobook (MP3/WAV) using edge-tts neural voices."""
@@ -3581,11 +3917,22 @@ class AudiobookDialog(QDialog):
 
         # --- chapter split controls ---------------------------------------
         chapter_head = QHBoxLayout()
-        self.chapter_lbl = QLabel("Chapters for whole-book split:")
-        chapter_head.addWidget(self.chapter_lbl, 1)
-        self.btn_ch_num = QPushButton("Select Numbered")
-        self.btn_ch_all = QPushButton("Select All")
-        self.btn_ch_none = QPushButton("Clear")
+        chapter_head.setSpacing(6)
+        self.chapter_lbl = QLabel("Split whole book by chapter")
+        self.chapter_lbl.setStyleSheet("font-weight: 600;")
+        chapter_head.addWidget(self.chapter_lbl)
+        self.chapter_count_lbl = QLabel("")
+        self.chapter_count_lbl.setStyleSheet("color: #9aa0a6;")
+        chapter_head.addWidget(self.chapter_count_lbl)
+        chapter_head.addStretch(1)
+        self.btn_ch_num = QPushButton("Numbered")
+        self.btn_ch_num.setToolTip("Select only the numbered chapters (e.g. 1, 2, 3 …)")
+        self.btn_ch_all = QPushButton("All")
+        self.btn_ch_all.setToolTip("Select every chapter, including front/back matter")
+        self.btn_ch_none = QPushButton("None")
+        self.btn_ch_none.setToolTip("Clear the chapter selection")
+        for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ch_num.clicked.connect(self._select_numbered_chapters)
         self.btn_ch_all.clicked.connect(lambda: self._set_all_chapters(True))
         self.btn_ch_none.clicked.connect(lambda: self._set_all_chapters(False))
@@ -3594,10 +3941,33 @@ class AudiobookDialog(QDialog):
         chapter_head.addWidget(self.btn_ch_none)
         root.addLayout(chapter_head)
         self.chapter_tree = QTreeWidget()
-        self.chapter_tree.setHeaderLabels(["Create", "Pages", "Chapter"])
+        self.chapter_tree.setHeaderLabels(["", "Pages", "Chapter"])
         self.chapter_tree.setRootIsDecorated(False)
         self.chapter_tree.setAlternatingRowColors(True)
-        self.chapter_tree.setMaximumHeight(150)
+        self.chapter_tree.setUniformRowHeights(True)
+        self.chapter_tree.setMinimumHeight(160)
+        self.chapter_tree.setMaximumHeight(230)
+        self.chapter_tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.chapter_tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Clicking anywhere on a row toggles its checkbox (bigger hit target).
+        self.chapter_tree.itemClicked.connect(self._on_chapter_row_clicked)
+        # Comfortable row height + subtle grid so ranges are easy to scan.
+        self.chapter_tree.setStyleSheet(
+            """
+            QTreeWidget { border: 1px solid palette(mid); border-radius: 6px; }
+            QTreeWidget::item { padding: 7px 4px; }
+            QHeaderView::section {
+                padding: 6px 8px; font-weight: 600; border: none;
+                border-bottom: 1px solid palette(mid);
+            }
+            """
+        )
+        hdr = self.chapter_tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        hdr.resizeSection(0, 40)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setStretchLastSection(True)
         self.chapter_tree.itemChanged.connect(lambda *_: self._update_chapter_count())
         root.addWidget(self.chapter_tree)
 
@@ -3610,9 +3980,18 @@ class AudiobookDialog(QDialog):
 
         opts.addWidget(QLabel("Speed:"))
         self.speed_combo = QComboBox()
-        for label, pct in (("Slow", -25), ("Normal", 0), ("Fast", 25), ("Faster", 50)):
+        # Playback-speed multipliers. edge-tts uses a percentage relative to the
+        # normal rate, so rate% = (multiplier - 1) * 100  (e.g. 1.5x -> +50%).
+        default_idx = 0
+        for i, mult in enumerate((0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)):
+            pct = round((mult - 1.0) * 100)
+            # Show "1x" rather than "1.0x", "1.25x" rather than "1.25x".
+            label = f"{mult:g}x"
+            if mult == 1.0:
+                label = "1x (Normal)"
+                default_idx = i
             self.speed_combo.addItem(label, pct)
-        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.setCurrentIndex(default_idx)
         opts.addWidget(self.speed_combo)
 
         opts.addWidget(QLabel("Format:"))
@@ -3625,13 +4004,8 @@ class AudiobookDialog(QDialog):
         self.status_lbl = QLabel("")
         root.addWidget(self.status_lbl)
 
-        self.progress = QProgressDialog(self)
-        self.progress.setWindowTitle("Generating Audiobook")
-        self.progress.setCancelButtonText("Cancel")
-        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress.setMinimumDuration(0)
-        self.progress.reset()
-        self.progress.canceled.connect(self._cancel_generation)
+        # Progress+log dialog is created on demand when generation starts.
+        self.progress = None
 
         actions = QHBoxLayout()
         self.sel_count_lbl = QLabel("0 pages selected")
@@ -3673,22 +4047,17 @@ class AudiobookDialog(QDialog):
 
     def _populate_voices(self):
         voices = _fetch_edge_tts_voices()
-        saved = self.settings.value("audiobook_voice", "", type=str)
-        idx_saved = -1
         idx_default = -1
         idx_us = -1
         for i, (short, label) in enumerate(voices):
             self.voice_combo.addItem(label, short)
-            if saved and short == saved:
-                idx_saved = i
             if short == self.DEFAULT_VOICE:
                 idx_default = i
             if idx_us == -1 and short.startswith("en-US"):
                 idx_us = i
-        # Priority: user's saved choice > Aria (US) > any US English > first.
-        if idx_saved != -1:
-            idx_to_select = idx_saved
-        elif idx_default != -1:
+        # Always default to US Aria. Fall back to any US English voice, then
+        # the first available voice if Aria isn't listed.
+        if idx_default != -1:
             idx_to_select = idx_default
         elif idx_us != -1:
             idx_to_select = idx_us
@@ -3721,16 +4090,54 @@ class AudiobookDialog(QDialog):
             return
         self.chapter_tree.setEnabled(True)
         for title, start, end in chapters:
-            pages = f"{start + 1}-{end + 1}" if start != end else f"{start + 1}"
+            n_pages = end - start + 1
+            if start != end:
+                pages = f"{start + 1}\u2013{end + 1}"          # en-dash range
+            else:
+                pages = f"{start + 1}"
             item = QTreeWidgetItem(["", pages, title])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             checked = self._is_default_chapter(title)
             item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, (title, start, end))
+
+            # Center the checkbox column; right-align the page range.
+            item.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setToolTip(
+                1, f"{n_pages} page{'s' if n_pages != 1 else ''}"
+            )
+            item.setToolTip(2, title)
+
+            # Emphasise real (numbered) chapters; de-emphasise front/back matter
+            # (Welcome, Copyright, Glossary, Index, …) that stays unchecked.
+            font = item.font(2)
+            if checked:
+                font.setBold(True)
+            else:
+                item.setForeground(1, QBrush(QColor("#9aa0a6")))
+                item.setForeground(2, QBrush(QColor("#9aa0a6")))
+            item.setFont(2, font)
+
             self.chapter_tree.addTopLevelItem(item)
             self._chapter_items.append(item)
-        self.chapter_tree.resizeColumnToContents(0)
         self.chapter_tree.resizeColumnToContents(1)
+
+    def _on_chapter_row_clicked(self, item: QTreeWidgetItem, column: int):
+        """Toggle a row's checkbox when the user clicks anywhere on the row
+        (not just the tiny checkbox), giving a much larger hit target."""
+        if item is None or not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return
+        # Clicking directly on the checkbox column already toggles it; only
+        # mirror the toggle for clicks on the Pages/Chapter columns.
+        if column == 0:
+            return
+        new_state = (
+            Qt.CheckState.Unchecked
+            if item.checkState(0) == Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
+        item.setCheckState(0, new_state)
 
     @staticmethod
     def _is_default_chapter(title: str) -> bool:
@@ -3777,19 +4184,17 @@ class AudiobookDialog(QDialog):
         total = len(self._chapter_items)
         selected = len(self._selected_chapters())
         if total == 0:
-            self.chapter_lbl.setText("Chapters for whole-book split: no TOC found")
+            self.chapter_count_lbl.setText("(no table of contents found)")
             self.btn_chapters.setEnabled(False)
-            self.btn_chapters.setText("Whole Book by Chapters...")
+            self.btn_chapters.setText("Whole Book by Chapters…")
             for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
                 b.setEnabled(False)
             return
         for b in (self.btn_ch_num, self.btn_ch_all, self.btn_ch_none):
             b.setEnabled(True)
-        self.chapter_lbl.setText(
-            f"Chapters for whole-book split: {selected} selected / {total} found"
-        )
+        self.chapter_count_lbl.setText(f"— {selected} of {total} selected")
         self.btn_chapters.setEnabled(selected > 0 and self._thread is None)
-        self.btn_chapters.setText(f"Whole Book by Chapters ({selected})...")
+        self.btn_chapters.setText(f"Whole Book by Chapters ({selected})…")
 
     def _render_previews(self):
         """Render each page to a small pixmap for its tile. Runs on the GUI
@@ -3974,18 +4379,7 @@ class AudiobookDialog(QDialog):
         # Spin up the worker on a background thread.
         self._thread = QThread(self)
         self._worker = AudiobookWorker(chunks, voice, rate_pct, out_path)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.failed.connect(self._on_failed)
-
-        self.progress.setLabelText("Starting…")
-        self.progress.setRange(0, len(chunks))
-        self.progress.setValue(0)
-        self.progress.show()
-        self._set_busy(True)
-        self._thread.start()
+        self._launch_worker(len(chunks), "Generating audiobook…")
 
     def _generate_chapters(self):
         if not edge_tts_available():
@@ -4068,16 +4462,28 @@ class AudiobookDialog(QDialog):
             [], voice, rate_pct, out_path=f"x.{fmt}",
             chapters=chapter_data, out_dir=target_dir,
         )
+        self._launch_worker(
+            len(chapter_data),
+            f"Generating {len(chapter_data)} chapter file(s)…",
+        )
+
+    def _launch_worker(self, total: int, status: str):
+        """Common wiring: move worker to its thread, build the log dialog,
+        connect signals, and start."""
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.log.connect(self._on_log)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
 
-        self.progress.setLabelText("Starting…")
-        self.progress.setRange(0, len(chapter_data))
-        self.progress.setValue(0)
+        self.progress = ProgressLogDialog("Generating Audiobook", self)
+        self.progress.canceled.connect(self._cancel_generation)
+        self.progress.set_status(status)
+        self.progress.set_progress(0, total)
+        self.progress.append_log("Starting…")
         self.progress.show()
+
         self._set_busy(True)
         self._thread.start()
 
@@ -4093,18 +4499,24 @@ class AudiobookDialog(QDialog):
 
     @pyqtSlot(int, int, str)
     def _on_progress(self, done: int, total: int, msg: str):
-        self.progress.setRange(0, total)
-        self.progress.setValue(done)
-        self.progress.setLabelText(msg)
+        if self.progress is not None:
+            self.progress.set_progress(done, total)
+            self.progress.set_status(msg)
         self.status_lbl.setText(msg)
+
+    @pyqtSlot(str)
+    def _on_log(self, line: str):
+        if self.progress is not None:
+            self.progress.append_log(line)
 
     @pyqtSlot(str)
     def _on_finished(self, path: str):
         self._teardown_thread()
-        self.progress.reset()
         self._set_busy(False)
         self.status_lbl.setText(f"Saved: {path}")
         is_dir = os.path.isdir(path)
+        if self.progress is not None:
+            self.progress.finish(True, f"Done — saved to:\n{path}")
         what = "chapter files were saved to folder" if is_dir else "audiobook was saved to"
         ret = QMessageBox.information(
             self, "Audiobook created",
@@ -4117,10 +4529,13 @@ class AudiobookDialog(QDialog):
     @pyqtSlot(str)
     def _on_failed(self, msg: str):
         self._teardown_thread()
-        self.progress.reset()
         self._set_busy(False)
-        self.status_lbl.setText("Failed.")
-        if msg.lower() != "cancelled.":
+        cancelled = msg.lower() == "cancelled."
+        self.status_lbl.setText("Cancelled." if cancelled else "Failed.")
+        if self.progress is not None:
+            self.progress.append_log("Cancelled." if cancelled else f"ERROR: {msg}")
+            self.progress.finish(False, "Cancelled." if cancelled else "Failed.")
+        if not cancelled:
             QMessageBox.critical(self, "Audiobook generation failed", msg)
 
     def _cancel_generation(self):
@@ -4130,8 +4545,20 @@ class AudiobookDialog(QDialog):
 
     def _teardown_thread(self):
         if self._thread is not None:
+            # run() blocks inside asyncio's loop.run_until_complete(); quit()
+            # can't interrupt that, only the worker's _cancel event (checked in
+            # the audio stream) can. Signal cancel first so the thread actually
+            # returns before we wait, and terminate as a last resort so we never
+            # delete a QThread that's still executing run().
+            if self._worker is not None:
+                try:
+                    self._worker.cancel()
+                except Exception:
+                    pass
             self._thread.quit()
-            self._thread.wait(3000)
+            if not self._thread.wait(5000):
+                self._thread.terminate()
+                self._thread.wait(1000)
             self._thread = None
         self._worker = None
 
@@ -4150,10 +4577,24 @@ class AudiobookDialog(QDialog):
             pass
 
     def reject(self):
+        # If generation is still running, confirm before cancelling — otherwise
+        # closing this window would silently abort the background job.
         if self._thread is not None and self._thread.isRunning():
+            ret = QMessageBox.question(
+                self, "Generation in progress",
+                "Audio is still being generated.\n\n"
+                "Close and cancel it? (Choose “No” to keep it running — you can "
+                "minimise this window and keep using the app.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return                      # keep the dialog (and job) open
             if self._worker is not None:
                 self._worker.cancel()
             self._teardown_thread()
+            if self.progress is not None:
+                self.progress.close()
         super().reject()
 
 
@@ -5407,8 +5848,15 @@ class MainWindow(QMainWindow):
                 "Then reopen this dialog."
             )
             return
+        # Non-modal so the user can keep using the app while an audiobook is
+        # being generated in the background. Keep a reference so Python doesn't
+        # garbage-collect the dialog (and its worker thread) while it's open.
         dlg = AudiobookDialog(v, self.settings, self)
-        dlg.exec()
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._audiobook_dlg = dlg
+        dlg.destroyed.connect(lambda *_: setattr(self, "_audiobook_dlg", None))
+        dlg.show()
 
     def _on_tts_state_changed(self, state: str):
         if state == ReadAloudController.STATE_PLAYING:
